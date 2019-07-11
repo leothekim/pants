@@ -1,21 +1,19 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
+from abc import ABC, abstractmethod
 
-from abc import abstractproperty
-
-from twitter.common.lang import AbstractClass
-
-from pants.backend.jvm.targets.jar_dependency import JarDependency
+from pants.java.jar.jar_dependency import JarDependency
 
 
-class Jarable(AbstractClass):
-  """A mixin that identifies a target as one that can provide a jar."""
+class Jarable(ABC):
+  """A mixin that identifies a target as one that can provide a jar.
 
-  @abstractproperty
+  :API: public
+  """
+
+  @property
+  @abstractmethod
   def identifier(self):
     """Subclasses should return a stable unique identifier for the jarable target."""
 
@@ -29,17 +27,14 @@ class Jarable(AbstractClass):
     return None
 
   def get_artifact_info(self):
-    """Returns a triple composed of a :class:`pants.backend.jvm.targets.jar_dependency.JarDependency`
-    describing the jar for this target, this target's artifact identifier and a bool indicating if
-    this target is exportable.
+    """Returns a tuple composed of a :class:`pants.java.jar.JarDependency`
+    describing the jar for this target and a bool indicating if this target is exportable.
     """
     exported = bool(self.provides)
 
     org = self.provides.org if exported else 'internal'
-    module = self.provides.name if exported else self.identifier
-
-    id_ = "%s-%s" % (self.provides.org, self.provides.name) if exported else self.identifier
+    name = self.provides.name if exported else self.identifier
 
     # TODO(John Sirois): This should return something less than a JarDependency encapsulating just
     # the org and name.  Perhaps a JarFamily?
-    return JarDependency(org=org, name=module, rev=None), id_, exported
+    return JarDependency(org=org, name=name, rev=None), exported

@@ -2,82 +2,36 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 target(
-  name = 'pants',
-  dependencies = [
+  dependencies=[
     'src/python/pants/bin:pants',
   ],
-).with_description('An alias for the pants binary target.')
-
-
-# TODO(John Sirois): Move this to an exposed function - consider
-# whether to introduce an un-exported pants-internal backend for
-# helpers like this if we don't want to export it to the world.
-def read_contents(path):
-  import os
-  with open(os.path.join(buildfile_path(), path)) as fp:
-    return fp.read()
-
-
-python_library(
-  name = 'pants-packaged',
-  provides=setup_py(
-    name='pantsbuild.pants',
-    version=pants_version(),
-    description='A bottom-up build tool.',
-    long_description=read_contents('ABOUT.rst') + read_contents('CHANGELOG.rst'),
-    url='https://github.com/pantsbuild/pants',
-    license='Apache License, Version 2.0',
-    zip_safe=True,
-    namespace_packages=['pants'],
-    classifiers=[
-      'Intended Audience :: Developers',
-      'License :: OSI Approved :: Apache Software License',
-      # We know for a fact these OSs work but, for example, know Windows
-      # does not work yet.  Take the conservative approach and only list OSs
-      # we know pants works with for now.
-      'Operating System :: MacOS :: MacOS X',
-      'Operating System :: POSIX :: Linux',
-      'Programming Language :: Python',
-      'Topic :: Software Development :: Build Tools',
-    ]
-  ).with_binaries(
-    # TODO(John Sirois): Switch back when target cycles have been sorted out.
-    # pants='src/python/pants/bin:pants',
-    pants=':_pants_transitional_publishable_binary_',
-  )
+  description='An alias for the pants binary target.',
 )
 
 python_library(
-  name='test_infra',
+  name='pants-packaged',
+  # NB: we must include at least one file in `sources` to avoid clang/gcc complaining
+  # `error: no input files`. We don't actually need to put any meaningful files here,
+  # though, because we use `with_binaries()` to link to the actual native code,
+  # so clang/gcc do not need to build any native code. Instead, we pass a dummy file. 
+  sources=['dummy.c'],
   dependencies=[
-    'tests/python/pants_test:base_test',
-    'tests/python/pants_test:int-test',
-    'tests/python/pants_test/jvm:jar_task_test_base',
-    'tests/python/pants_test/jvm:nailgun_task_test_base',
-    'tests/python/pants_test/jvm:jvm_tool_task_test_base',
-    'tests/python/pants_test/engine:engine_test_base',
+    ':version',
   ],
-  provides=setup_py(
-    name='pantsbuild.pants.testinfra',
-    version=pants_version(),
-    description='Test support for writing pants plugins.',
-    long_description=read_contents('ABOUT.rst') + read_contents('CHANGELOG.rst'),
-    url='https://github.com/pantsbuild/pants',
-    license='Apache License, Version 2.0',
-    zip_safe=True,
-    namespace_packages=['pants_test'],
-    classifiers=[
-      'Intended Audience :: Developers',
-      'License :: OSI Approved :: Apache Software License',
-      # We know for a fact these OSs work but, for example, know Windows
-      # does not work yet.  Take the conservative approach and only list OSs
-      # we know pants works with for now.
-      'Operating System :: MacOS :: MacOS X',
-      'Operating System :: POSIX :: Linux',
-      'Programming Language :: Python',
-      'Topic :: Software Development :: Build Tools',
-      'Topic :: Software Development :: Testing',
-    ]
+  provides=pants_setup_py(
+    name='pantsbuild.pants',
+    description='A scalable build tool for large, complex, heterogeneous repos.',
+    namespace_packages=['pants', 'pants.backend'],
+    # NB: by setting `ext_modules`, we signal to setup_py and bdist_wheel that this library
+    # has native code. As a consquence, bdist_wheel pins the ABI (application binary interface)
+    # used when creating the wheel, which is a good thing. We should be setting this ABI to ensure
+    # consumers of pantsbuild.pants are using a compatible interpreter, for example
+    # that we correctly distinguish when using Python 2 between interpreters built with UCS2 vs. UCS4 
+    # (see https://www.python.org/dev/peps/pep-0513/#ucs-2-vs-ucs-4-builds).
+    # TODO(7344): the tuple syntax for ext_modules is deprecated. Use Extension once we support it.
+    ext_modules=[('native_engine', {'sources': ['src/pants/dummy.c']})],
+  ).with_binaries(
+    pants='src/python/pants/bin:pants',
   )
 )
 
@@ -85,35 +39,28 @@ page(name='readme',
   source='README.md',
 )
 
-# XXX move into base or thrift
 python_library(
-  name = 'binary_util',
-  sources = ['binary_util.py'],
+  name='version',
+  sources=['version.py'],
   dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.collections',
-    '3rdparty/python/twitter/commons:twitter.common.lang',
-    '3rdparty/python/twitter/commons:twitter.common.log',
-    'src/python/pants/base:config',
-    'src/python/pants/base:exceptions',
-    'src/python/pants/util:contextutil',
-    'src/python/pants/util:dirutil',
+    '3rdparty/python:packaging',
+    ':version-resource',
+  ]
+)
+
+resources(
+  name='version-resource',
+  sources=['VERSION'],
+)
+
+page(name='changelog',
+  source='CHANGELOG.md',
+  links=[
+    'src/python/pants/notes:notes-1.0.x',
+    'src/python/pants/notes:notes-master',
   ],
-)
-
-python_library(
-  name = 'thrift_util',
-  sources = ['thrift_util.py'],
-  dependencies = [
-    ':binary_util',
-  ],
-)
-
-python_library(
-  name = 'version',
-  sources = ['version.py'],
-)
-
-page(
-  name='changelog',
-  source='CHANGELOG.rst'
+  description='''
+This file is no longer a changelog, but remains in this location in order to avoid breaking
+older changelog links unnecessarily. Could consider removing it by 2.0.x, perhaps.
+''',
 )

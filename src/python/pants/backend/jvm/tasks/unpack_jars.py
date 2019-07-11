@@ -1,120 +1,60 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
+from hashlib import sha1
 
-import logging
-import os
-import re
-import shutil
-
-from twitter.common.dirutil.fileset import fnmatch_translate_extended
-
-from pants.backend.core.tasks.task import Task
 from pants.backend.jvm.targets.unpacked_jars import UnpackedJars
-from pants.base.build_environment import get_buildroot
+from pants.backend.jvm.tasks.jar_import_products import JarImportProducts
+from pants.base.fingerprint_strategy import DefaultFingerprintHashingMixin, FingerprintStrategy
 from pants.fs.archive import ZIP
+from pants.task.unpack_remote_sources_base import UnpackRemoteSourcesBase
+from pants.util.objects import SubclassesOf
 
 
-logger = logging.getLogger(__name__)
+class UnpackJarsFingerprintStrategy(DefaultFingerprintHashingMixin, FingerprintStrategy):
+
+  def compute_fingerprint(self, target):
+    """UnpackedJars targets need to be re-unpacked if any of its configuration changes or any of
+    the jars they import have changed.
+    """
+    if isinstance(target, UnpackedJars):
+      hasher = sha1()
+      for cache_key in sorted(jar.cache_key() for jar in target.all_imported_jar_deps):
+        hasher.update(cache_key.encode())
+      hasher.update(target.payload.fingerprint().encode())
+      return hasher.hexdigest()
+    return None
 
 
-class UnpackJars(Task):
-  """Looks for UnpackedJars targets and unpacks them.
+class UnpackJars(UnpackRemoteSourcesBase):
+  """Unpack artifacts specified by unpacked_jars() targets.
 
-     Adds an entry to SourceRoot for the contents.  Initially only
-     supported by JavaProtobufLibrary.
+  Adds an entry to SourceRoot for the contents.
+
+  :API: public
   """
 
-  class InvalidPatternError(Exception):
-    """Thrown if a pattern can't be compiled for including or excluding args"""
-
-  @classmethod
-  def product_types(cls):
-    return ['unpacked_archives']
+  source_target_constraint = SubclassesOf(UnpackedJars)
 
   @classmethod
   def prepare(cls, options, round_manager):
-    round_manager.require_data('ivy_imports')
-
-  def __init__(self, *args, **kwargs):
-    super(UnpackJars, self).__init__(*args, **kwargs)
-    self._buildroot = get_buildroot()
-
-  def _unpack_dir(self, unpacked_jars):
-    return os.path.normpath(os.path.join(self._workdir, unpacked_jars.id))
+    super().prepare(options, round_manager)
+    round_manager.require_data(JarImportProducts)
 
   @classmethod
-  def _unpack_filter(cls, filename, include_patterns, exclude_patterns):
-    """:return: True if the file should be allowed through the filter"""
-    found = False
-    if include_patterns:
-      for include_pattern in include_patterns:
-        if include_pattern.match(filename):
-          found = True
-          break
-      if not found:
-        return False
-    if exclude_patterns:
-      for exclude_pattern in exclude_patterns:
-        if exclude_pattern.match(filename):
-          return False
-    return True
+  def implementation_version(cls):
+    return super().implementation_version() + [('UnpackJars', 0)]
 
-  @classmethod
-  def _compile_patterns(cls, patterns, field_name="Unknown", spec="Unknown"):
-    compiled_patterns = []
-    for p in patterns:
-      try:
-        compiled_patterns.append(re.compile(fnmatch_translate_extended(p)))
-      except (TypeError, re.error) as e:
-        raise cls.InvalidPatternError(
-          'In {spec}, "{field_value}" in {field_name} can\'t be compiled: {msg}'
-          .format(field_name=field_name, field_value=p, spec=spec, msg=e))
-    return compiled_patterns
+  def get_fingerprint_strategy(self):
+    return UnpackJarsFingerprintStrategy()
 
-  def _unpack(self, unpacked_jars):
-    """Extracts files from the downloaded jar files and places them in a work directory.
+  def unpack_target(self, unpacked_jars, unpack_dir):
+    direct_coords = {jar.coordinate for jar in unpacked_jars.all_imported_jar_deps}
+    unpack_filter = self.get_unpack_filter(unpacked_jars)
+    jar_import_products = self.context.products.get_data(JarImportProducts)
 
-    :param UnpackedJars unpacked_jars: target referencing jar_libraries to unpack.
-    """
-    unpack_dir = self._unpack_dir(unpacked_jars)
-    if os.path.exists(unpack_dir):
-      shutil.rmtree(unpack_dir)
-    if not os.path.exists(unpack_dir):
-      os.makedirs(unpack_dir)
-
-    include_patterns = self._compile_patterns(unpacked_jars.include_patterns,
-                                              field_name='include_patterns',
-                                              spec=unpacked_jars.address.spec)
-    exclude_patterns = self._compile_patterns(unpacked_jars.exclude_patterns,
-                                              field_name='exclude_patterns',
-                                              spec=unpacked_jars.address.spec)
-
-    unpack_filter = lambda f: self._unpack_filter(f, include_patterns, exclude_patterns)
-    products = self.context.products.get('ivy_imports')
-    jarmap = products[unpacked_jars]
-
-    for path, names in jarmap.items():
-      for name in names:
-        jar_path = os.path.join(path, name)
-        ZIP.extract(jar_path, unpack_dir,
-                    filter_func=unpack_filter)
-
-  def execute(self):
-    addresses = [target.address for target in self.context.targets()]
-    unpacked_jars_list = [t for t in self.context.build_graph.transitive_subgraph_of_addresses(addresses)
-                     if isinstance(t, UnpackedJars)]
-    for unpacked_jars_target in unpacked_jars_list:
-      self._unpack(unpacked_jars_target)
-      unpack_dir = self._unpack_dir(unpacked_jars_target)
-      found_files = []
-      for root, dirs, files in os.walk(unpack_dir):
-        for f in files:
-          relpath = os.path.relpath(os.path.join(root, f), unpack_dir)
-          found_files.append(relpath)
-      rel_unpack_dir = os.path.relpath(unpack_dir, self._buildroot)
-      unpacked_sources_product = self.context.products.get_data('unpacked_archives', lambda: {})
-      unpacked_sources_product[unpacked_jars_target] = [found_files, rel_unpack_dir]
+    for coordinate, jar_path in jar_import_products.imports(unpacked_jars):
+      if not unpacked_jars.payload.intransitive or coordinate in direct_coords:
+        self.context.log.info('Unpacking jar {coordinate} from {jar_path} to {unpack_dir}.'.format(
+          coordinate=coordinate, jar_path=jar_path, unpack_dir=unpack_dir))
+        ZIP.extract(jar_path, unpack_dir, filter_func=unpack_filter)

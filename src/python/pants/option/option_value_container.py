@@ -1,39 +1,15 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
+import copy
 
 from pants.option.ranked_value import RankedValue
 
 
-class OptionValueContainer(object):
+class OptionValueContainer:
   """A container for option values.
 
-  Implements the following functionality:
-
-  1) Attribute forwarding.
-
-     An attribute can be registered as forwarding to another attribute, and attempts
-     to read the source attribute's value will be read from the target attribute.
-
-     This is necessary so we can qualify registered options by the scope that registered them,
-     to allow re-registration in inner scopes. This is best explained by example:
-
-     Say that in global scope we register an option with two names: [-f, --foo], which writes its
-     value to the attribute foo. Then in the compile scope we re-register --foo but leave -f alone.
-     The re-registered --foo will also write to attribute foo. So now -f, which in the compile
-     scope is unrelated to --foo, can still stomp on its value.
-
-     With attribute forwarding we can have the global scope option write to _DEFAULT_foo__, and
-     the re-registered option to _COMPILE_foo__, and then have the 'f' and 'foo' attributes
-     forward, appropriately.
-
-     Note that only reads are forwarded. The target of the forward must be written to directly.
-     If the source attribute is set directly, this overrides any forwarding.
-
-  2) Value ranking.
+  Implements "value ranking":
 
      Attribute values can be ranked, so that a given attribute's value can only be changed if
      the new value has at least as high a rank as the old value. This allows an option value in
@@ -42,68 +18,127 @@ class OptionValueContainer(object):
      the inner one from config).
 
      See ranked_value.py for more details.
-
-  Note that this container is suitable for passing as the namespace argument to argparse's
-  parse_args() method.
   """
+
   def __init__(self):
-    self._forwardings = {}  # src attribute name -> target attribute name.
+    self._value_map = {}  # key -> either raw value or RankedValue wrapping the raw value.
 
-  def add_forwardings(self, forwardings):
-    """Add attribute forwardings.
+  def get_explicit_keys(self):
+    """Returns the keys for any values that were set explicitly (via flag, config, or env var)."""
+    ret = []
+    for k, v in self._value_map.items():
+      if v.rank > RankedValue.CONFIG_DEFAULT:
+        ret.append(k)
+    return ret
 
-    Will overwrite existing forwardings with the same source attributes.
+  def get_rank(self, key):
+    """Returns the rank of the value at the specified key.
 
-    :param forwardings: A map of source attribute name -> attribute to read source's value from.
+    Returns one of the constants in RankedValue.
     """
-    self._forwardings.update(forwardings)
+    return self._value_map.get(key).rank
 
-  def update(self, attrs):
-    """Set attr values on this object from the data in the attrs dict."""
-    for k, v in attrs.items():
-      setattr(self, k, v)
+  def is_flagged(self, key):
+    """Returns `True` if the value for the specified key was supplied via a flag.
 
-  def __setattr__(self, key, value):
-    if key == '_forwardings':
-      return super(OptionValueContainer, self).__setattr__(key, value)
+    A convenience equivalent to `get_rank(key) == RankedValue.FLAG`.
 
-    if hasattr(self, key):
-      existing_value = getattr(self, key)
-      if isinstance(existing_value, RankedValue):
-        existing_rank = existing_value.rank
-      else:
-        # Values without rank are assumed to be flag values set by argparse.
-        existing_rank = RankedValue.FLAG
+    This check can be useful to determine whether or not a user explicitly set an option for this
+    run.  Although a user might also set an option explicitly via an environment variable, ie via:
+    `ENV_VAR=value ./pants ...`, this is an ambiguous case since the environment variable could also
+    be permanently set in the user's environment.
+
+    :param string key: The name of the option to check.
+    :returns: `True` if the option was explicitly flagged by the user from the command line.
+    :rtype: bool
+    """
+    return self.get_rank(key) == RankedValue.FLAG
+
+  def is_default(self, key):
+    """Returns `True` if the value for the specified key was not supplied by the user.
+
+    I.e. the option was NOT specified config files, on the cli, or in environment variables.
+
+    :param string key: The name of the option to check.
+    :returns: `True` if the user did not set the value for this option.
+    :rtype: bool
+    """
+    return self.get_rank(key) in (RankedValue.NONE, RankedValue.HARDCODED)
+
+  def get(self, key, default=None):
+    # Support dict-like dynamic access.  See also __getitem__ below.
+    if key in self._value_map:
+      return self._get_underlying_value(key)
+    else:
+      return default
+
+  def update(self, other):
+    """Set other's values onto this object.
+
+    For each key, highest ranked value wins. In a tie, other's value wins.
+
+    :param OptionValueContainer other: Augment our values with this object's values.
+    """
+    for k, v in other._value_map.items():
+      self._set(k, v)
+
+  def as_dict(self):
+    return {key: self.get(key) for key in self._value_map}
+
+  def _get_underlying_value(self, key):
+    # Note that the key may exist with a value of None, so we can't just
+    # test self._value_map.get() for None.
+    if key not in self._value_map:
+      raise AttributeError(key)
+    val = self._value_map[key]
+    if isinstance(val, RankedValue):
+      return val.value
+    else:
+      return val
+
+  def _set(self, key, value):
+    if key in self._value_map:
+      existing_value = self._value_map[key]
+      existing_rank = existing_value.rank
     else:
       existing_rank = RankedValue.NONE
 
     if isinstance(value, RankedValue):
       new_rank = value.rank
     else:
-      # Values without rank are assumed to be flag values set by argparse.
-      new_rank = RankedValue.FLAG
+      raise AttributeError('Value must be of type RankedValue: {}'.format(value))
 
     if new_rank >= existing_rank:
       # We set values from outer scopes before values from inner scopes, so
       # in case of equal rank we overwrite. That way that the inner scope value wins.
-      super(OptionValueContainer, self).__setattr__(key, value)
+      self._value_map[key] = value
 
+  # Support natural dynamic access, e.g., opts[foo] is more idiomatic than getattr(opts, 'foo').
   def __getitem__(self, key):
-    # Support natural dynamic access, options[key_var] is more idiomatic than
-    # getattr(option, key_var).
     return getattr(self, key)
 
-  def __getattr__(self, key):
-    # Note: Called only if regular attribute lookup fails, so accesses
-    # to non-forwarded attributes will be handled the normal way.
+  # Support attribute setting, e.g., opts.foo = 42.
+  def __setattr__(self, key, value):
+    if key == '_value_map':
+      return super().__setattr__(key, value)
+    self._set(key, value)
 
-    if key == '_forwardings':
+  # Support attribute getting, e.g., foo = opts.foo.
+  # Note: Called only if regular attribute lookup fails,
+  # so method and member access will be handled the normal way.
+  def __getattr__(self, key):
+    if key == '_value_map':
       # In case we get called in copy/deepcopy, which don't invoke the ctor.
-      raise AttributeError
-    if key not in self._forwardings:
-      raise AttributeError('No such forwarded attribute: %s' % key)
-    val = getattr(self, self._forwardings[key])
-    if isinstance(val, RankedValue):
-      return val.value
-    else:
-      return val
+      raise AttributeError(key)
+    return self._get_underlying_value(key)
+
+  def __iter__(self):
+    """Returns an iterator over all option names, in lexicographical order."""
+    for name in sorted(self._value_map.keys()):
+      yield name
+
+  def __copy__(self):
+    """Ensure that a shallow copy has its own value map."""
+    ret = type(self)()
+    ret._value_map = copy.copy(self._value_map)
+    return ret

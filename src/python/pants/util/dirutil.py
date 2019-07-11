@@ -1,9 +1,5 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
 
 import atexit
 import errno
@@ -12,15 +8,61 @@ import shutil
 import stat
 import tempfile
 import threading
+import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 
 from pants.util.strutil import ensure_text
+
+
+def longest_dir_prefix(path, prefixes):
+  """Given a list of prefixes, return the one that is the longest prefix to the given path.
+
+  Returns None if there are no matches.
+  """
+  longest_match, longest_prefix = 0, None
+  for prefix in prefixes:
+    if fast_relpath_optional(path, prefix) is not None and len(prefix) > longest_match:
+      longest_match, longest_prefix = len(prefix), prefix
+
+  return longest_prefix
+
+
+def fast_relpath(path, start):
+  """A prefix-based relpath, with no normalization or support for returning `..`."""
+  relpath = fast_relpath_optional(path, start)
+  if relpath is None:
+    raise ValueError('{} is not a directory containing {}'.format(start, path))
+  return relpath
+
+
+def fast_relpath_optional(path, start):
+  """A prefix-based relpath, with no normalization or support for returning `..`.
+
+  Returns None if `start` is not a directory-aware prefix of `path`.
+  """
+  if len(start) == 0:
+    # Empty prefix.
+    return path
+
+  # Determine where the matchable prefix ends.
+  pref_end = len(start) - 1 if start[-1] == '/' else len(start)
+  if pref_end > len(path):
+    # The prefix is too long to match.
+    return None
+  elif path[:pref_end] == start[:pref_end] and (len(path) == pref_end or path[pref_end] == '/'):
+    # The prefix matches, and the entries are either identical, or the suffix indicates that
+    # the prefix is a directory.
+    return path[pref_end+1:]
 
 
 def safe_mkdir(directory, clean=False):
   """Ensure a directory is present.
 
-  If it's not there, create it.  If it is, no-op. If clean is True, ensure the dir is empty."""
+  If it's not there, create it.  If it is, no-op. If clean is True, ensure the dir is empty.
+
+  :API: public
+  """
   if clean:
     safe_rmtree(directory)
   try:
@@ -31,11 +73,78 @@ def safe_mkdir(directory, clean=False):
 
 
 def safe_mkdir_for(path, clean=False):
+  """Ensure that the parent directory for a file is present.
+
+  If it's not there, create it. If it is, no-op.
   """
-    Ensure that the parent directory for a file is present.  If it's not there, create it.
-    If it is, no-op. If clean is True, ensure the directory is empty.
+  safe_mkdir(os.path.dirname(path), clean=clean)
+
+
+def safe_mkdir_for_all(paths):
+  """Make directories which would contain all of the passed paths.
+
+  This avoids attempting to re-make the same directories, which may be noticeably expensive if many
+  paths mostly fall in the same set of directories.
+
+  :param list of str paths: The paths for which containing directories should be created.
   """
-  safe_mkdir(os.path.dirname(path), clean)
+  created_dirs = set()
+  for path in paths:
+    dir_to_make = os.path.dirname(path)
+    if dir_to_make not in created_dirs:
+      safe_mkdir(dir_to_make)
+      created_dirs.add(dir_to_make)
+
+
+# TODO(#6742): payload should be Union[str, bytes] in type hint syntax, but from
+# https://pythonhosted.org/an_example_pypi_project/sphinx.html#full-code-example it doesn't appear
+# that is possible to represent in docstring type syntax.
+def safe_file_dump(filename, payload='', mode='w', makedirs=False):
+  """Write a string to a file.
+
+  This method is "safe" to the extent that `safe_open` is "safe". See the explanation on the method
+  doc there.
+
+  When `payload` is an empty string (the default), this method can be used as a concise way to
+  create an empty file along with its containing directory (or truncate it if it already exists).
+
+  :param string filename: The filename of the file to write to.
+  :param string payload: The string to write to the file.
+  :param string mode: A mode argument for the python `open` builtin which should be a write mode
+                      variant. Defaults to 'w'.
+  :param bool makedirs: Whether to make all parent directories of this file before making it.
+  """
+  if makedirs:
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+  with safe_open(filename, mode=mode) as f:
+    f.write(payload)
+
+
+def maybe_read_file(filename, binary_mode=False):
+  """Read and return the contents of a file in a single file.read().
+
+  :param string filename: The filename of the file to read.
+  :param bool binary_mode: Read from file as bytes or unicode.
+  :returns: The contents of the file, or opening the file fails for any reason
+  :rtype: string
+  """
+  try:
+    return read_file(filename, binary_mode=binary_mode)
+  except IOError:
+    return None
+
+
+def read_file(filename, binary_mode=False):
+  """Read and return the contents of a file in a single file.read().
+
+  :param string filename: The filename of the file to read.
+  :param bool binary_mode: Read from file as bytes or unicode.
+  :returns: The contents of the file.
+  :rtype: string
+  """
+  mode = 'rb' if binary_mode else 'r'
+  with open(filename, mode) as f:
+    return f.read()
 
 
 def safe_walk(path, **kwargs):
@@ -48,10 +157,89 @@ def safe_walk(path, **kwargs):
     unicode_literals. See e.g.
     https://mail.python.org/pipermail/python-dev/2008-December/083856.html
 
+    :API: public
   """
   # If os.walk is given a text argument, it yields text values; if it
   # is given a binary argument, it yields binary values.
   return os.walk(ensure_text(path), **kwargs)
+
+
+class ExistingFileError(ValueError):
+  """Indicates a copy operation would over-write a file with a directory."""
+
+
+class ExistingDirError(ValueError):
+  """Indicates a copy operation would over-write a directory with a file."""
+
+
+def mergetree(src, dst, symlinks=False, ignore=None, file_filter=None):
+  """Just like `shutil.copytree`, except the `dst` dir may exist.
+
+  The `src` directory will be walked and its contents copied into `dst`. If `dst` already exists the
+  `src` tree will be overlayed in it; ie: existing files in `dst` will be over-written with files
+  from `src` when they have the same subtree path.
+  """
+  safe_mkdir(dst)
+
+  if not file_filter:
+    file_filter = lambda _: True
+
+  for src_path, dirnames, filenames in safe_walk(src, topdown=True, followlinks=True):
+    ignorenames = ()
+    if ignore:
+      to_ignore = ignore(src_path, dirnames + filenames)
+      if to_ignore:
+        ignorenames = frozenset(to_ignore)
+
+    src_relpath = os.path.relpath(src_path, src)
+    dst_path = os.path.join(dst, src_relpath)
+
+    visit_dirs = []
+    for dirname in dirnames:
+      if dirname in ignorenames:
+        continue
+
+      src_dir = os.path.join(src_path, dirname)
+      dst_dir = os.path.join(dst_path, dirname)
+      if os.path.exists(dst_dir):
+        if not os.path.isdir(dst_dir):
+          raise ExistingFileError('While copying the tree at {} to {}, encountered directory {} in '
+                                  'the source tree that already exists in the destination as a '
+                                  'non-directory.'.format(src, dst, dst_dir))
+        visit_dirs.append(dirname)
+      elif symlinks and os.path.islink(src_dir):
+        link = os.readlink(src_dir)
+        os.symlink(link, dst_dir)
+        # We need to halt the walk at a symlink dir; so we do not place dirname in visit_dirs
+        # here.
+      else:
+        os.makedirs(dst_dir)
+        visit_dirs.append(dirname)
+
+    # In-place mutate dirnames to halt the walk when the dir is ignored by the caller.
+    dirnames[:] = visit_dirs
+
+    for filename in filenames:
+      if filename in ignorenames:
+        continue
+      src_file_relpath = os.path.join(src_relpath, filename)
+      if not file_filter(src_file_relpath):
+        continue
+
+      dst_filename = os.path.join(dst_path, filename)
+      if os.path.exists(dst_filename):
+        if not os.path.isfile(dst_filename):
+          raise ExistingDirError('While copying the tree at {} to {}, encountered file {} in the '
+                                 'source tree that already exists in the destination as a non-file.'
+                                 .format(src, dst, dst_filename))
+        else:
+          os.unlink(dst_filename)
+      src_filename = os.path.join(src_path, filename)
+      if symlinks and os.path.islink(src_filename):
+        link = os.readlink(src_filename)
+        os.symlink(link, dst_filename)
+      else:
+        shutil.copy2(src_filename, dst_filename)
 
 
 _MKDTEMP_CLEANER = None
@@ -83,6 +271,8 @@ def safe_mkdtemp(cleaner=_mkdtemp_atexit_cleaner, **kw):
   """Create a temporary directory that is cleaned up on process exit.
 
   Arguments are as to tempfile.mkdtemp.
+
+  :API: public
   """
   # Proper lock sanitation on fork [issue 6721] would be desirable here.
   with _MKDTEMP_LOCK:
@@ -98,26 +288,30 @@ def register_rmtree(directory, cleaner=_mkdtemp_atexit_cleaner):
 
 
 def safe_rmtree(directory):
+  """Delete a directory if it's present. If it's not present, no-op.
+
+  Note that if the directory argument is a symlink, only the symlink will
+  be deleted.
+
+  :API: public
   """
-    Delete a directory if it's present. If it's not present, no-op.
-  """
-  if os.path.exists(directory):
-    shutil.rmtree(directory, True)
+  if os.path.islink(directory):
+    safe_delete(directory)
+  else:
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 def safe_open(filename, *args, **kwargs):
+  """Open a file safely, ensuring that its directory exists.
+
+  :API: public
   """
-    Open a file safely (ensuring that the directory components leading up to it
-    have been created first.)
-  """
-  safe_mkdir(os.path.dirname(filename))
+  safe_mkdir_for(filename)
   return open(filename, *args, **kwargs)
 
 
 def safe_delete(filename):
-  """
-    Delete a file safely. If it's not present, no-op.
-  """
+  """Delete a file safely. If it's not present, no-op."""
   try:
     os.unlink(filename)
   except OSError as e:
@@ -125,10 +319,67 @@ def safe_delete(filename):
       raise
 
 
+def safe_concurrent_rename(src, dst):
+  """Rename src to dst, ignoring errors due to dst already existing.
+
+  Useful when concurrent processes may attempt to create dst, and it doesn't matter who wins.
+  """
+  # Delete dst, in case it existed (with old content) even before any concurrent processes
+  # attempted this write. This ensures that at least one process writes the new content.
+  if os.path.isdir(src):  # Note that dst may not exist, so we test for the type of src.
+    safe_rmtree(dst)
+  else:
+    safe_delete(dst)
+  try:
+    shutil.move(src, dst)
+  except IOError as e:
+    if e.errno != errno.EEXIST:
+      raise
+
+
+def safe_rm_oldest_items_in_dir(root_dir, num_of_items_to_keep, excludes=frozenset()):
+  """
+  Keep `num_of_items_to_keep` newly modified items besides `excludes` in `root_dir` then remove the rest.
+  :param root_dir: the folder to examine
+  :param num_of_items_to_keep: number of files/folders/symlinks to keep after the cleanup
+  :param excludes: absolute paths excluded from removal (must be prefixed with `root_dir`)
+  :return: none
+  """
+  if os.path.isdir(root_dir):
+    found_files = []
+    for old_file in os.listdir(root_dir):
+      full_path = os.path.join(root_dir, old_file)
+      if full_path not in excludes:
+        found_files.append((full_path, os.path.getmtime(full_path)))
+    found_files = sorted(found_files, key=lambda x: x[1], reverse=True)
+    for cur_file, _ in found_files[num_of_items_to_keep:]:
+      rm_rf(cur_file)
+
+
+@contextmanager
+def safe_concurrent_creation(target_path):
+  """A contextmanager that yields a temporary path and renames it to a final target path when the
+  contextmanager exits.
+
+  Useful when concurrent processes may attempt to create a file, and it doesn't matter who wins.
+
+  :param target_path: The final target path to rename the temporary path to.
+  :yields: A temporary path containing the original path with a unique (uuid4) suffix.
+  """
+  safe_mkdir_for(target_path)
+  tmp_path = '{}.tmp.{}'.format(target_path, uuid.uuid4().hex)
+  try:
+    yield tmp_path
+  except Exception:
+    rm_rf(tmp_path)
+    raise
+  else:
+    if os.path.exists(tmp_path):
+      safe_concurrent_rename(tmp_path, target_path)
+
+
 def chmod_plus_x(path):
-  """
-    Equivalent of unix `chmod a+x path`
-  """
+  """Equivalent of unix `chmod a+x path`"""
   path_mode = os.stat(path).st_mode
   path_mode &= int('777', 8)
   if path_mode & stat.S_IRUSR:
@@ -140,7 +391,69 @@ def chmod_plus_x(path):
   os.chmod(path, path_mode)
 
 
+def absolute_symlink(source_path, target_path):
+  """Create a symlink at target pointing to source using the absolute path.
+
+  :param source_path: Absolute path to source file
+  :param target_path: Absolute path to intended symlink
+  :raises ValueError if source_path or link_path are not unique, absolute paths
+  :raises OSError on failure UNLESS file already exists or no such file/directory
+  """
+  if not os.path.isabs(source_path):
+    raise ValueError("Path for source : {} must be absolute".format(source_path))
+  if not os.path.isabs(target_path):
+    raise ValueError("Path for link : {} must be absolute".format(target_path))
+  if source_path == target_path:
+    raise ValueError("Path for link is identical to source : {}".format(source_path))
+  try:
+    if os.path.lexists(target_path):
+      if os.path.islink(target_path) or os.path.isfile(target_path):
+        os.unlink(target_path)
+      else:
+        shutil.rmtree(target_path)
+    safe_mkdir_for(target_path)
+    os.symlink(source_path, target_path)
+  except OSError as e:
+    # Another run may beat us to deletion or creation.
+    if not (e.errno == errno.EEXIST or e.errno == errno.ENOENT):
+      raise
+
+
+def relative_symlink(source_path, link_path):
+  """Create a symlink at link_path pointing to relative source
+
+  :param source_path: Absolute path to source file
+  :param link_path: Absolute path to intended symlink
+  :raises ValueError if source_path or link_path are not unique, absolute paths
+  :raises OSError on failure UNLESS file already exists or no such file/directory
+  """
+  if not os.path.isabs(source_path):
+    raise ValueError("Path for source:{} must be absolute".format(source_path))
+  if not os.path.isabs(link_path):
+    raise ValueError("Path for link:{} must be absolute".format(link_path))
+  if source_path == link_path:
+    raise ValueError("Path for link is identical to source:{}".format(source_path))
+  # The failure state below had a long life as an uncaught error. No behavior was changed here, it just adds a catch.
+  # Raising an exception does differ from absolute_symlink, which takes the liberty of deleting existing directories.
+  if os.path.isdir(link_path) and not os.path.islink(link_path):
+    raise ValueError("Path for link would overwrite an existing directory: {}".format(link_path))
+  try:
+    if os.path.lexists(link_path):
+      os.unlink(link_path)
+    rel_path = os.path.relpath(source_path, os.path.dirname(link_path))
+    safe_mkdir_for(link_path)
+    os.symlink(rel_path, link_path)
+  except OSError as e:
+    # Another run may beat us to deletion or creation.
+    if not (e.errno == errno.EEXIST or e.errno == errno.ENOENT):
+      raise
+
+
 def relativize_path(path, rootdir):
+  """
+
+  :API: public
+  """
   # Note that we can't test for length and return the shorter of the two, because we need these
   # paths to be stable across systems (e.g., because they get embedded in analysis files),
   # and this choice might be inconsistent across systems. So we assume the relpath is always
@@ -161,6 +474,8 @@ def relativize_paths(paths, rootdir):
 def touch(path, times=None):
   """Equivalent of unix `touch path`.
 
+    :API: public
+
     :path: The file to touch.
     :times Either a tuple of (atime, mtime) or else a single time to use for both.  If not
            specified both atime and mtime are updated to the current time.
@@ -175,3 +490,88 @@ def touch(path, times=None):
 
   with safe_open(path, 'a'):
     os.utime(path, times)
+
+
+def recursive_dirname(f):
+  """Given a relative path like 'a/b/c/d', yield all ascending path components like:
+
+        'a/b/c/d'
+        'a/b/c'
+        'a/b'
+        'a'
+        ''
+  """
+  prev = None
+  while f != prev:
+    yield f
+    prev = f
+    f = os.path.dirname(f)
+  yield ''
+
+
+def get_basedir(path):
+  """Returns the base directory of a path.
+
+  Examples:
+    get_basedir('foo/bar/baz') --> 'foo'
+    get_basedir('/foo/bar/baz') --> ''
+    get_basedir('foo') --> 'foo'
+  """
+  return path[:path.index(os.sep)] if os.sep in path else path
+
+
+def rm_rf(name):
+  """Remove a file or a directory similarly to running `rm -rf <name>` in a UNIX shell.
+
+  :param str name: the name of the file or directory to remove.
+  :raises: OSError on error.
+  """
+  if not os.path.exists(name):
+    return
+
+  try:
+    # Avoid using safe_rmtree so we can detect failures.
+    shutil.rmtree(name)
+  except OSError as e:
+    if e.errno == errno.ENOTDIR:
+      # 'Not a directory', but a file. Attempt to os.unlink the file, raising OSError on failure.
+      safe_delete(name)
+    elif e.errno != errno.ENOENT:
+      # Pass on 'No such file or directory', otherwise re-raise OSError to surface perm issues etc.
+      raise
+
+
+def is_executable(path):
+  """Returns whether a path names an existing executable file."""
+  return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def split_basename_and_dirname(path):
+  if not os.path.isfile(path):
+    raise ValueError("{} does not exist or is not a regular file.".format(path))
+  return (os.path.dirname(path), os.path.basename(path))
+
+
+def check_no_overlapping_paths(paths):
+  """Given a list of paths, ensure that all are unique and do not have the same prefix."""
+  for path in paths:
+    list_copy_without_path = list(paths)
+    list_copy_without_path.remove(path)
+    if path in list_copy_without_path:
+      raise ValueError('{} appeared more than once. All paths must be unique.'.format(path))
+    for p in list_copy_without_path:
+      if path in p:
+        raise ValueError('{} and {} have the same prefix. All paths must be unique and cannot overlap.'.format(path, p))
+
+
+def is_readable_dir(path):
+  """Returns whether a path names an existing directory we can list and read files from."""
+  return os.path.isdir(path) and os.access(path, os.R_OK) and os.access(path, os.X_OK)
+
+
+def is_writable_dir(path):
+  """Returns whether a path names an existing directory that we can create and modify files in.
+
+  We call is_readable_dir(), so this definition of "writable" is a superset of that.
+  """
+  return is_readable_dir(path) and os.access(path, os.W_OK)

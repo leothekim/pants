@@ -1,0 +1,22 @@
+[package]
+version = "0.0.1"
+edition = "2018"
+name = "fs"
+authors = [ "Pants Build <pantsbuild@gmail.com>" ]
+publish = false
+
+[dependencies]
+boxfuture = { path = "../boxfuture" }
+bytes = "0.4.5"
+futures = "^0.1.16"
+glob = "0.2.11"
+ignore = "0.4.4"
+lazy_static = "1"
+log = "0.4"
+parking_lot = "0.6"
+task_executor = { path = "../task_executor" }
+tempfile = "3"
+
+[dev-dependencies]
+testutil = { path = "../testutil" }
+tokio = "0.1"

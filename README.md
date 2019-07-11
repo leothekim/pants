@@ -4,7 +4,11 @@ Pants is a build system for software projects in a variety of languages.
 It works particularly well for a source code repository that contains
 many distinct projects.
 
-Friendly documentation: http://pantsbuild.github.io/
+Friendly documentation: http://www.pantsbuild.org/
+
+We release to [PyPI](https://pypi.org/pypi)
+[![version](https://img.shields.io/pypi/v/pantsbuild.pants.svg)](https://pypi.org/pypi/pantsbuild.pants)
+[![license](https://img.shields.io/pypi/l/pantsbuild.pants.svg)](https://pypi.org/pypi/pantsbuild.pants)
 
 We use [Travis CI](https://travis-ci.org) to verify the build
 [![Build Status](https://travis-ci.org/pantsbuild/pants.svg?branch=master)](https://travis-ci.org/pantsbuild/pants/branches).
@@ -14,9 +18,15 @@ We use [Coveralls](https://coveralls.io) to monitor test coverage
 
 # Requirements
 
-At a minimum, pants requires the following to run properly:
+At a minimum, Pants requires the following to run properly:
 
-* Linux or Mac OS X
-* Python 2.7 or later (2.7.8 recommended)
-* OpenJDK 7 or greater, Oracle JDK 6 or greater
-* Internet access (so that pants can fully bootstrap itself)
+* Linux or macOS.
+* Python 3.6+.
+* A C compiler, system headers, Python headers (to compile native Python modules) and the libffi
+  library and headers (to compile and link modules that use CFFI to access native code).
+* Internet access (so that Pants can fully bootstrap itself)
+
+Additionally, if you use the JVM backend to work with Java or Scala code (installed by default):
+
+* OpenJDK or Oracle JDK version 7 or greater.
+

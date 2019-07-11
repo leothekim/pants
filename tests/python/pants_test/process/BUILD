@@ -2,10 +2,9 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_tests(
-  name = 'process',
-  sources = globs('*.py'),
   dependencies = [
-    '3rdparty/python:mox',
     'src/python/pants/process',
+    'tests/python/pants_test:test_base',
+    'tests/python/pants_test/subsystem:subsystem_utils',
   ]
 )

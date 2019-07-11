@@ -1,50 +1,51 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
+from pants.backend.jvm.targets.import_jars_mixin import ImportJarsMixin
+from pants.backend.jvm.tasks.classpath_products import ArtifactClasspathEntry, ClasspathProducts
 from pants.backend.jvm.tasks.ivy_task_mixin import IvyTaskMixin
+from pants.backend.jvm.tasks.jar_import_products import JarImportProducts
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 
 
 class IvyImports(IvyTaskMixin, NailgunTask):
-  """Resolves a jar of .proto files for each target in the context which has imports (ie, for each
-  JavaProtobufLibrary target).
-  """
+  """Resolves jar files for imported_targets on `ImportJarsMixin` targets.
 
-  _CONFIG_SECTION = 'ivy-imports'
+  One use case is for JavaProtobufLibrary, which includes imports for jars containing .proto files.
+  """
 
   # TODO https://github.com/pantsbuild/pants/issues/604 product_types start
   @classmethod
   def product_types(cls):
-    return ['ivy_imports']
+    return [JarImportProducts]
   # TODO https://github.com/pantsbuild/pants/issues/604 product_types finish
 
-  @classmethod
-  def prepare(cls, options, round_manager):
-    super(IvyImports, cls).prepare(options, round_manager)
-    round_manager.require_data('jvm_build_tools_classpath_callbacks')
-
-  @property
-  def config_section(self):
-    return self._CONFIG_SECTION
-
-  def _str_jar(self, jar):
-    return 'jar' + str((jar.org, jar.name, jar.rev))
+  @staticmethod
+  def has_imports(target):
+    return isinstance(target, ImportJarsMixin) and target.imported_targets
 
   def execute(self):
-    def nice_target_name(t):
-      return t.address.spec
+    jar_import_products = self.context.products.get_data(JarImportProducts,
+                                                         init_func=JarImportProducts)
 
-    resolve_for = self.context.targets(lambda t: t.has_label('has_imports'))
-    if resolve_for:
-      imports_map = self.context.products.get('ivy_imports')
-      executor = self.create_java_executor()
-      for target in resolve_for:
-        jars = target.imports
-        self.context.log.info('Mapping import jars for {target}: \n  {jars}'.format(
-            target=nice_target_name(target),
-            jars='\n  '.join(self._str_jar(s) for s in jars)))
-        self.mapjars(imports_map, target, executor, jars=jars)
+    # Gather all targets that are both capable of importing jars and actually declare some imports.
+    targets = self.context.targets(predicate=self.has_imports)
+    if not targets:
+      return
+
+    # Create a list of all of these targets plus the list of JarDependencies they depend on.
+    all_targets = set(targets)
+    for target in targets:
+      all_targets.update(target.imported_targets)
+
+    imports_classpath = ClasspathProducts(self.get_options().pants_workdir)
+    self.resolve(executor=self.create_java_executor(),
+                 targets=all_targets,
+                 classpath_products=imports_classpath,
+                 invalidate_dependents=True)
+
+    for target in targets:
+      cp_entries = imports_classpath.get_classpath_entries_for_targets(target.closure(bfs=True))
+      for conf, cp_entry in cp_entries:
+        if isinstance(cp_entry, ArtifactClasspathEntry):
+          jar_import_products.imported(target, cp_entry.coordinate, cp_entry.path)

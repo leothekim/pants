@@ -1,62 +1,91 @@
 Installing Pants
 ================
 
-**As of September 2014, alas, Pants is not something you can just
-install and use.** To be precise: you can install it, but unless you've
-also
-[[Set up your code workspace to work with Pants|pants('src/docs:setup_repo')]],
-it won't work. You can use it in a workspace in which some Pants expert has
-set it up.
+There are a few ways to get a runnable version of Pants set up for your workspace. Before
+beginning, make sure your machine fits the requirements. At a minimum, Pants requires the following to run properly:
 
-We're fixing this problem, but we're not done yet.
+* Linux or macOS.
+* Python 3.6+.
+* A C compiler, system headers, Python headers (to compile native Python modules) and the libffi
+  library and headers (to compile and link modules that use CFFI to access native code).
+* OpenJDK or Oracle JDK 7 or greater.
+* Internet access (so that Pants can fully bootstrap itself)
 
-If want to try out Pants and no Pants expert has set it up for you, you
-might try <https://github.com/twitter/commons>.
-(<https://github.com/pantsbuild/pants> also uses Pants to build, but
-there tends to be a lot of "churn".)
+After you have Pants installed, you'll need to
+[[Set up your code workspace to work with Pants|pants('src/docs:setup_repo')]].
 
-If you're reading this in an organization that already uses Pants, ask
-your neighbor where your source code is.
-
-There are a few ways to get a runnable version of Pants into a
-developer's workspace.
-
-Virtualenv-based Installation
------------------------------
-
-[Virtualenv](http://www.virtualenv.org/) is a tool for creating isolated
-Python environments. This is the recommended way of installing pants
-locally as it does not modify the system Python libraries.
-
-    :::bash
-    $ virtualenv /tmp/pants
-    $ source /tmp/pants/bin/activate
-    $ pip install pantsbuild.pants
-    $ pants
-
-To simplify a virtualenv-based installation, add a wrapper script to
-your repo. For an example, see the
-[`twitter/commons` script `./pants`](https://github.com/twitter/commons/blob/master/pants),
-and its helper scripts.
-
-System-wide Installation
+Recommended Installation
 ------------------------
 
-To install pants for all users on your system:
+To set up Pants in your repo, we recommend installing our self-contained `pants` bash script
+in the root (i.e. the "buildroot") of your repo:
 
     :::bash
-    $ pip install pantsbuild.pants
+    curl -L -O https://pantsbuild.github.io/setup/pants && chmod +x pants
 
-This installs pants (and its dependencies) into your Python distribution
-site-packages, making it available to all users on your system. This
-installation method requires root access and may cause dependency
-conflicts with other pip-installed applications.
+Start by running the below command to auto-generate a `pants.ini` config file with sensible defaults.
+
+    :::bash
+    ./pants generate-pants-ini
+
+This command pins the `pants_version`. When you'd like to upgrade Pants, just edit the version in `pants.ini` and `./pants` will self-update on the next run.
+
+To use Pants plugins published to PyPi, add them to a `plugins` list, like so:
+
+    :::ini
+    [GLOBAL]
+    pants_version: 1.15.0
+
+    plugins: [
+        'pantsbuild.pants.contrib.go==%(pants_version)s',
+        'pantsbuild.pants.contrib.scrooge==%(pants_version)s',
+      ]
+
+Pants will notice you changed your plugins and will install them the next time you run `./pants`.
+
+Note that the formatting of the plugins list is important; all lines below the `plugins:` line must be
+indented by at least one white space to form logical continuation lines. This is standard for Python
+ini files. See [[Options|pants('src/docs:options')]] for a guide on modifying your `pants.ini`.
+
+The ./pants Runner Script
+-------------------------
+
+We highly recommend invoking pants via a checked-in runner script named `pants` in the
+root of your workspace, as demonstrated above.  Pants uses the presence of such a file, in the
+current working directory or in any of its ancestors, to detect the buildroot, e.g., when
+invoked in a subdirectory.
+
+If, for whatever reason, you don't want to run pants that way, you can also just check in an
+empty file named `pants` to act as a sentinel for the buildroot.
+
+Note that you can create whatever symlinks or extra wrapper scripts you like.  There's no absolute
+requirement that pants be invoked directly via `./pants`.  All pants cares about is the existence
+of a file named `pants` in the buildroot, and that file might as well be the runner script!
 
 PEX-based Installation
 ----------------------
+The virtualenv-based method is the recommended way of installing Pants.
+However in cases where you can't depend on a local pants installation (e.g., your machines
+prohibit software installation), some sites fetch a pre-built executable `pants.pex` using
+the `pants_version` defined in `pants.ini`.  To upgrade pants, they generate a `pants.pex`
+and upload it to a file server at a location computable  from the version number.
+They then write their own `./pants` script that checks the `pants_version` in
+`pants.ini` and download the appropriate pex from the file server to the correct spot.
 
-To support hermetic builds and not depend on a local pants installation (e.g.: CI machines may
-prohibit software installation), some sites fetch a pre-build `pants.pex` whose version is
-checked-into `pants.ini`. To upgrade pants, generate a `pants.pex` and upload it to a file
-server at a location computable from the version number. Set up the workspace's `./pants` script
-to check the `.ini` file for a version number and download from the correct spot.
+Troubleshooting
+---------------
+
+While pants is written in pure Python, some of its dependencies contain native code. Therefore,
+you'll need to make sure you have the appropriate compiler infrastructure installed on the machine
+where you are attempting to bootstrap pants. In particular, if you see an error similar to this:
+
+    :::bash
+    Installing setuptools, pip...done.
+        Command "/Users/someuser/workspace/pants/build-support/pants_deps.venv/bin/python2.7 -c "import setuptools, tokenize;__file__='/private/var/folders/zc/0jhjvzy56s723lpq23q89f6c0000gn/T/pip-build-mZzSSA/psutil/setup.py';exec(compile(getattr(tokenize, 'open', open)(__file__).read().replace('\r\n', '\n'), __file__, 'exec'))" install --record /var/folders/zc/0jhjvzy56s723lpq23q89f6c0000gn/T/pip-iONF8p-record/install-record.txt --single-version-externally-managed --compile --install-headers /Users/someuser/workspace/pants/build-support/pants_deps.venv/bin/../include/site/python2.7/psutil" failed with error code 1 in /private/var/folders/zc/0jhjvzy56s723lpq23q89f6c0000gn/T/pip-build-mZzSSA/psutil
+
+    Failed to install requirements from /Users/someuser/workspace/pants/3rdparty/python/requirements.txt.
+
+This indicates that pants was attempting to `pip install` the `psutil` dependency into it's private
+virtualenv, and that install failed due to a compiler issue. On macOS, we recommend running
+`xcode-select --install` to make sure you have the latest compiler infrastructure installed, and
+unset any compiler-related environment variables (i.e. run `unset CC`).

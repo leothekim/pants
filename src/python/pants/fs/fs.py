@@ -1,18 +1,13 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
 
 import hashlib
 import os
 
 
-# This is the max filename length for HFS+, extX and NTFS - the most likely filesystems pants will
-# be run under.
-# TODO(John Sirois): consider a better isolation layer
-_MAX_FILENAME_LENGTH = 255
+# The max filename length for HFS+, extX and NTFS is 255, but many systems also have limits on the
+# total path length (made up of multiple filenames), so we include some additional buffer.
+_MAX_FILENAME_LENGTH = 100
 
 
 def safe_filename(name, extension=None, digest=None, max_length=_MAX_FILENAME_LENGTH):
@@ -26,6 +21,8 @@ def safe_filename(name, extension=None, digest=None, max_length=_MAX_FILENAME_LE
   Also raises ValueError when the name is simple but cannot be satisfactorily shortened with the
   given digest.
 
+  :API: public
+
   name:       the proposed filename without extension
   extension:  an optional extension to append to the filename
   digest:     the digest to fall back on for too-long name, extension concatenations - should
@@ -33,7 +30,7 @@ def safe_filename(name, extension=None, digest=None, max_length=_MAX_FILENAME_LE
   max_length: the maximum desired file name length
   """
   if os.path.basename(name) != name:
-    raise ValueError('Name must be a filename, handed a path: %s' % name)
+    raise ValueError('Name must be a filename, handed a path: {}'.format(name))
 
   ext = extension or ''
   filename = name + ext
@@ -41,14 +38,25 @@ def safe_filename(name, extension=None, digest=None, max_length=_MAX_FILENAME_LE
     return filename
   else:
     digest = digest or hashlib.sha1()
-    digest.update(name)
-    safe_name = digest.hexdigest() + ext
+    digest.update(filename.encode())
+    hexdigest = digest.hexdigest()[:16]
+
+    # Prefix and suffix length: max length less 2 periods, the extension length, and the digest length.
+    ps_len = max(0, (max_length - (2 + len(ext) + len(hexdigest))) // 2)
+    sep = '.' if ps_len > 0 else ''
+    prefix = name[:ps_len]
+    suffix = name[-ps_len:] if ps_len > 0 else ''
+
+    safe_name = '{}{}{}{}{}{}'.format(prefix, sep, hexdigest, sep, suffix, ext)
     if len(safe_name) > max_length:
-      raise ValueError('Digest %s failed to produce a filename <= %d '
-                       'characters for %s - got %s' % (digest, max_length, filename, safe_name))
+      raise ValueError('Digest {} failed to produce a filename <= {} '
+                       'characters for {} - got {}'.format(digest, max_length, filename, safe_name))
     return safe_name
 
 
 def expand_path(path):
-  """Returns ``path`` as an absolute path with ~user and env var expansion applied."""
+  """Returns ``path`` as an absolute path with ~user and env var expansion applied.
+
+  :API: public
+  """
   return os.path.abspath(os.path.expandvars(os.path.expanduser(path)))

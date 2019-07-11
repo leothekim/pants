@@ -1,22 +1,17 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
 import os
 import pkgutil
-import urlparse
 
 import pystache
 
 
-class MustacheRenderer(object):
+class MustacheRenderer:
   """Renders text using mustache templates."""
 
   class MustacheError(Exception):
-    """Indicates failure rendering mustache templates"""
+    """Indicates failure rendering mustache templates."""
 
   @staticmethod
   def expand(args):
@@ -39,6 +34,11 @@ class MustacheRenderer(object):
     ret.update(dict(items))
     return ret
 
+  @staticmethod
+  def parse_template(template_text):
+    template = pystache.parse(template_text)
+    return template
+
   def __init__(self, template_dir=None, package_name=None):
     """Create a renderer that finds templates by name in one of two ways.
 
@@ -50,50 +50,43 @@ class MustacheRenderer(object):
     """
     self._template_dir = template_dir
     self._package_name = package_name
-    self._pystache_renderer = pystache.Renderer(search_dirs=template_dir)
+    if self._package_name is not None:
+      class PartialsLoader:
+        def get(me, template_name):
+          return self._get_template_text_from_package(template_name)
+      partials = PartialsLoader()
+    else:
+      partials = None
+    self._pystache_renderer = pystache.Renderer(search_dirs=template_dir, partials=partials)
+    self._templates = {}
 
   def render_name(self, template_name, args):
-    # TODO: Precompile and cache the templates?
-    if self._template_dir:
-      # Let pystache find the template by name.
-      return self._pystache_renderer.render_name(template_name, MustacheRenderer.expand(args))
-    else:
-      # Load the named template embedded in our package.
-      path = os.path.join('templates', template_name + '.mustache')
-      template = pkgutil.get_data(self._package_name, path)
-
-      if template == None:
-        raise self.MustacheError(
-          "could not find template %s in package %s" % (path, self._package_name))
-
-      return self.render(template, args)
+    parsed_template = self._load_template(template_name)
+    return self.render(parsed_template, args)
 
   def render(self, template, args):
     return self._pystache_renderer.render(template, MustacheRenderer.expand(args))
 
-  def render_callable(self, inner_template_name, arg_string, outer_args):
-    """Handle a mustache callable.
+  def _load_template(self, template_name):
+    template = self._templates.get(template_name)
+    if not template:
+      if self._template_dir:
+        # Let pystache find the template by name.
+        template = self._pystache_renderer.load_template(template_name)
+      else:
+        template_text = self._get_template_text_from_package(template_name)
+        template = MustacheRenderer.parse_template(template_text)
+      self._templates[template_name] = template
+    return template
 
-    In a mustache template, when foo is callable, ``{{#foo}}arg_string{{/foo}}`` is replaced
-    with the result of calling ``foo(arg_string)``. The callable must interpret ``arg_string``.
+  def _get_template_text_from_package(self, template_name):
+    """Load the named template embedded in our package."""
+    if self._package_name is None:
+      raise self.MustacheError('No package specified for template loading.')
 
-    This method provides an implementation of such a callable that does the following:
-
-    #. Parses the arg_string as CGI args.
-    #. Adds them to the original args that the enclosing template was rendered with.
-    #. Renders some other template against those args.
-    #. Returns the resulting text.
-
-    Use by adding
-    ``{ 'foo': lambda x: self._renderer.render_callable('foo_template', x, args) }``
-    to the args of the outer template, which can then contain ``{{#foo}}arg_string{{/foo}}``.
-    """
-    # First render the arg_string (mustache doesn't do this for you, and it may itself
-    # contain mustache constructs).
-    rendered_arg_string = self.render(arg_string, outer_args)
-    # Parse the inner args as CGI args.
-    inner_args = dict([(k, v[0]) for k, v in urlparse.parse_qs(rendered_arg_string).items()])
-    # Order matters: lets the inner args override the outer args.
-    args = dict(outer_args.items() + inner_args.items())
-    # Render.
-    return self.render_name(inner_template_name, args)
+    path = os.path.join('templates', template_name + '.mustache')
+    template_text = pkgutil.get_data(self._package_name, path)
+    if template_text is None:
+      raise self.MustacheError(
+        'could not find template {} in package {}'.format(path, self._package_name))
+    return template_text.decode('utf8')

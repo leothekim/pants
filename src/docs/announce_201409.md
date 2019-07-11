@@ -15,7 +15,7 @@ Another solution is to have a single large, unified code base. We’ve
 found that this promotes better engineering team cohesion and
 collaboration which results in greater productivity and happiness.
 However, tooling for such structured code bases has been lacking which
-is why we developed [Pants](http://pantsbuild.github.io/), an open
+is why we developed [Pants](http://pantsbuild.org/), an open
 source build system written in Python.
 
 Pants models code modules (known as “targets”) and their dependencies in
@@ -50,11 +50,11 @@ now lives in a standalone repo at <https://github.com/pantsbuild/pants>.
 
 Among Pants’s current strengths are:
 
--   Builds [Java](http://pantsbuild.github.io/JVMProjects.html), Scala,
-    and [Python](http://pantsbuild.github.io/python-readme.html).
+-   Builds [Java](http://pantsbuild.org/JVMProjects.html), Scala,
+    and [Python](http://pantsbuild.org/python-readme.html).
 -   Adding support for new languages is straightforward.
 -   Supports code generation:
-    [thrift](http://pantsbuild.github.io/ThriftDeps.html), protocol
+    [thrift](http://pantsbuild.org/ThriftDeps.html), protocol
     buffers, custom code generators.
 -   Resolves external JVM and Python dependencies.
 -   Runs tests.
@@ -65,7 +65,7 @@ Among Pants’s current strengths are:
 -   Support for local and distributed caching.
 -   Especially fast for Scala builds, compared to alternatives.
 -   Builds standalone python executables ([PEX
-    files](http://pex.readthedocs.org/))
+    files](https://pex.readthedocs.io/))
 -   Has a plugin system to add custom features and override stock
     behavior.
 -   Runs on Linux and Mac OS X.
@@ -83,7 +83,7 @@ Pants is still a young and evolving open source project. We constantly
 strive to make it easier to use. If you’re interested in using or
 learning from Pants, our advice is to reach out to the community on the
 [developer mailing
-list](http://pantsbuild.github.io/howto_contribute.html) and follow
+list](http://pantsbuild.org/howto_contribute.html) and follow
 [@pantsbuild](https://twitter.com/pantsbuild) on Twitter for updates.
 
 **Organization Perspectives:**

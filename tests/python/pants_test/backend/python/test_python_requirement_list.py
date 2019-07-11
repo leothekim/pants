@@ -1,22 +1,19 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
 
 from textwrap import dedent
 
 from pants.backend.python.python_requirement import PythonRequirement
 from pants.backend.python.targets.python_requirement_library import PythonRequirementLibrary
-from pants.base.build_file_aliases import BuildFileAliases
-from pants_test.base_test import BaseTest
+from pants.base.exceptions import TargetDefinitionException
+from pants.build_graph.build_file_aliases import BuildFileAliases
+from pants_test.test_base import TestBase
 
 
-class PythonRequirementListTest(BaseTest):
-  @property
-  def alias_groups(self):
-    return BuildFileAliases.create(
+class PythonRequirementListTest(TestBase):
+  @classmethod
+  def alias_groups(cls):
+    return BuildFileAliases(
         targets={
             'python_requirement_library': PythonRequirementLibrary,
         },
@@ -36,7 +33,7 @@ class PythonRequirementListTest(BaseTest):
             ]
           )
         '''))
-    with self.assertRaises(ValueError):
+    with self.assertRaises(TargetDefinitionException):
       self.target('lib:pyunit')
 
   def test_good_list(self):

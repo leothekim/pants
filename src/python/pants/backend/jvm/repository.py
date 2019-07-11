@@ -1,15 +1,14 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
 
 import os
 
 
-class Repository(object):
-  """An artifact repository, such as a maven repo."""
+class Repository:
+  """An artifact repository, such as a maven repo.
+
+  :API: public
+  """
 
   def __init__(self, name=None, url=None, push_db_basedir=None, **kwargs):
     """
@@ -39,4 +38,4 @@ class Repository(object):
     return not self.__eq__(other)
 
   def __repr__(self):
-    return "%s -> %s (%s)" % (self.name, self.url, self.push_db_basedir)
+    return "{} -> {} ({})".format(self.name, self.url, self.push_db_basedir)

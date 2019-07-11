@@ -1,22 +1,23 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
-
-from .jvm_tool_task_test_base import JvmToolTaskTestBase
+from pants_test.jvm.jvm_tool_task_test_base import JvmToolTaskTestBase
 
 
 class NailgunTaskTestBase(JvmToolTaskTestBase):
-  """Prepares an ephemeral test build root that supports nailgun tasks."""
-  def setUp(self):
-    super(NailgunTaskTestBase, self).setUp()
-    self.set_options(ng_daemons=True)
+  """Ensures `NailgunTask` tests use subprocess mode to stably test the task under test.
 
-  @classmethod
-  def tearDownClass(cls):
-    # Kill any nailguns launched in our ephemeral build root
-    NailgunTask.killall()
+  For subclasses of NailgunTask the nailgun behavior is irrelevant to the code under test and can
+  cause problems in CI environments. As such, disabling nailgunning ensures the test focus is where
+  it needs to be to test the unit.
+
+  :API: public
+  """
+
+  def setUp(self):
+    """
+    :API: public
+    """
+    super().setUp()
+    self.set_options(execution_strategy=NailgunTask.ExecutionStrategy.subprocess)

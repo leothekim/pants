@@ -1,225 +1,201 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
+import logging
 import os
 import shutil
+from collections import defaultdict
+from textwrap import dedent
 
-from pex.archiver import Archiver
-from pex.crawler import Crawler
-from pex.installer import EggInstaller
-from pex.interpreter import PythonIdentity, PythonInterpreter
-from pex.iterator import Iterator
-from pex.package import EggPackage, SourcePackage
-from pkg_resources import Requirement
+from pex.interpreter import PythonInterpreter
 
-from pants.backend.python.python_setup import PythonSetup
-from pants.backend.python.resolver import context_from_config, fetchers_from_config
-from pants.util.dirutil import safe_mkdir
-
-
-# TODO(wickman) Create a safer version of this and add to twitter.common.dirutil
-def _safe_link(src, dst):
-  try:
-    os.unlink(dst)
-  except OSError:
-    pass
-  os.symlink(src, dst)
+from pants.backend.python.subsystems.python_setup import PythonSetup
+from pants.backend.python.targets.python_target import PythonTarget
+from pants.base.exceptions import TaskError
+from pants.process.lock import OwnerPrintingInterProcessFileLock
+from pants.subsystem.subsystem import Subsystem
+from pants.util.dirutil import safe_concurrent_creation, safe_mkdir
+from pants.util.memo import memoized_property
 
 
-def _resolve_interpreter(config, interpreter, requirement, logger=print):
-  """Given a :class:`PythonInterpreter` and :class:`Config`, and a requirement,
-     return an interpreter with the capability of resolving that requirement or
-    ``None`` if it's not possible to install a suitable requirement."""
-  interpreter_cache = PythonInterpreterCache._cache_dir(config)
-  interpreter_dir = os.path.join(interpreter_cache, str(interpreter.identity))
-  if interpreter.satisfies([requirement]):
-    return interpreter
-
-  def installer_provider(sdist):
-    return EggInstaller(
-        Archiver.unpack(sdist),
-        strict=requirement.key != 'setuptools',
-        interpreter=interpreter)
-
-  egg = _resolve_and_link(
-      config,
-      requirement,
-      os.path.join(interpreter_dir, requirement.key),
-      installer_provider,
-      logger=logger)
-
-  if egg:
-    return interpreter.with_extra(egg.name, egg.raw_version, egg.path)
-  else:
-    logger('Failed to resolve requirement %s for %s' % (requirement, interpreter))
+logger = logging.getLogger(__name__)
 
 
-def _resolve_and_link(config, requirement, target_link, installer_provider, logger=print):
-  # Short-circuit if there is a local copy
-  if os.path.exists(target_link) and os.path.exists(os.path.realpath(target_link)):
-    egg = EggPackage(os.path.realpath(target_link))
-    if egg.satisfies(requirement):
-      return egg
-
-  fetchers = fetchers_from_config(config)
-  context = context_from_config(config)
-  iterator = Iterator(fetchers=fetchers, crawler=Crawler(context))
-  links = [link for link in iterator.iter(requirement) if isinstance(link, SourcePackage)]
-
-  for link in links:
-    logger('    fetching %s' % link.url)
-    sdist = context.fetch(link)
-    logger('    installing %s' % sdist)
-    installer = installer_provider(sdist)
-    dist_location = installer.bdist()
-    target_location = os.path.join(os.path.dirname(target_link), os.path.basename(dist_location))
-    shutil.move(dist_location, target_location)
-    _safe_link(target_location, target_link)
-    logger('    installed %s' % target_location)
-    return EggPackage(target_location)
-
-
-# This is a setuptools <1 and >1 compatible version of Requirement.parse.
-# For setuptools <1, if you did Requirement.parse('setuptools'), it would
-# return 'distribute' which of course is not desirable for us.  So they
-# added a replacement=False keyword arg.  Sadly, they removed this keyword
-# arg in setuptools >= 1 so we have to simply failover using TypeError as a
-# catch for 'Invalid Keyword Argument'.
-def _failsafe_parse(requirement):
-  try:
-    return Requirement.parse(requirement, replacement=False)
-  except TypeError:
-    return Requirement.parse(requirement)
-
-
-def _resolve(config, interpreter, logger=print):
-  """Resolve and cache an interpreter with a setuptools and wheel capability."""
-
-  setuptools_requirement = _failsafe_parse(
-      'setuptools==%s' % config.get('python-setup', 'setuptools_version', default='5.4.1'))
-  wheel_requirement = _failsafe_parse(
-      'wheel==%s' % config.get('python-setup', 'wheel_version', default='0.23.0'))
-
-  interpreter = _resolve_interpreter(config, interpreter, setuptools_requirement, logger=logger)
-  if interpreter:
-    return _resolve_interpreter(config, interpreter, wheel_requirement, logger=logger)
-
-
-class PythonInterpreterCache(object):
-  @staticmethod
-  def _cache_dir(config):
-    return PythonSetup(config).scratch_dir('interpreter_cache', default_name='interpreters')
-
-  @staticmethod
-  def _interpreter_requirement(config):
-    return PythonSetup(config).interpreter_requirement
-
-  @staticmethod
-  def _matches(interpreter, filters):
-    return any(interpreter.identity.matches(filt) for filt in filters)
+# TODO: Move under subsystems/ .
+class PythonInterpreterCache(Subsystem):
+  """Finds Python interpreters on the local system."""
+  options_scope = 'python-interpreter-cache'
 
   @classmethod
-  def _matching(cls, interpreters, filters):
+  def subsystem_dependencies(cls):
+    return super().subsystem_dependencies() + (PythonSetup,)
+
+  class UnsatisfiableInterpreterConstraintsError(TaskError):
+    """Indicates a Python interpreter matching given constraints could not be located."""
+
+  @staticmethod
+  def _matches(interpreter, filters=()):
+    return not filters or any(interpreter.identity.matches(filt) for filt in filters)
+
+  @classmethod
+  def _matching(cls, interpreters, filters=()):
     for interpreter in interpreters:
-      if cls._matches(interpreter, filters):
+      if cls._matches(interpreter, filters=filters):
         yield interpreter
 
-  @classmethod
-  def select_interpreter(cls, compatibilities, allow_multiple=False):
-    """Given a set of interpreters, either return them all if ``allow_multiple`` is ``True``;
-    otherwise, return the lowest compatible interpreter.
-    """
-    if allow_multiple:
-      return compatibilities
-    return [min(compatibilities)] if compatibilities else []
-
-  def __init__(self, config, logger=None):
-    self._path = self._cache_dir(config)
-    self._config = config
-    safe_mkdir(self._path)
-    self._interpreters = set()
-    self._logger = logger or (lambda msg: True)
-    self._default_filters = (PythonInterpreterCache._interpreter_requirement(config) or b'',)
-
   @property
-  def interpreters(self):
-    """Returns the set of cached interpreters."""
-    return self._interpreters
+  def python_setup(self):
+    return PythonSetup.global_instance()
 
-  def _interpreter_from_path(self, path, filters):
-    interpreter_dir = os.path.basename(path)
-    identity = PythonIdentity.from_path(interpreter_dir)
+  @memoized_property
+  def _cache_dir(self):
+    cache_dir = self.python_setup.interpreter_cache_dir
+    safe_mkdir(cache_dir)
+    return cache_dir
+
+  def partition_targets_by_compatibility(self, targets):
+    """Partition targets by their compatibility constraints.
+
+    :param targets: a list of `PythonTarget` objects
+    :returns: (tgts_by_compatibilities, filters): a dict that maps compatibility constraints
+      to a list of matching targets, the aggregate set of compatibility constraints imposed
+      by the target set
+    :rtype: (dict(str, list), set)
+    """
+    tgts_by_compatibilities = defaultdict(list)
+    filters = set()
+
+    for target in targets:
+      if isinstance(target, PythonTarget):
+        c = self.python_setup.compatibility_or_constraints(target.compatibility)
+        tgts_by_compatibilities[c].append(target)
+        filters.update(c)
+    return tgts_by_compatibilities, filters
+
+  def select_interpreter_for_targets(self, targets):
+    """Pick an interpreter compatible with all the specified targets."""
+
+    tgts_by_compatibilities, total_filter_set = self.partition_targets_by_compatibility(targets)
+    allowed_interpreters = set(self.setup(filters=total_filter_set))
+
+    # Constrain allowed_interpreters based on each target's compatibility requirements.
+    for compatibility in tgts_by_compatibilities:
+      compatible_with_target = set(self._matching(allowed_interpreters, compatibility))
+      allowed_interpreters &= compatible_with_target
+
+    if not allowed_interpreters:
+      # Create a helpful error message.
+      all_interpreter_version_strings = sorted({
+        interpreter.version_string
+        # NB: self.setup() requires filters to be passed, or else it will use the global interpreter
+        # constraints. We allow any interpreter other than CPython 3.0-3.3, which is known to choke
+        # with Pants.
+        for interpreter in self.setup(filters=("CPython<3", "CPython>=3.3", "PyPy"))
+      })
+      unique_compatibilities = {tuple(c) for c in tgts_by_compatibilities.keys()}
+      unique_compatibilities_strs = [','.join(x) for x in unique_compatibilities if x]
+      tgts_by_compatibilities_strs = [t[0].address.spec for t in tgts_by_compatibilities.values()]
+      raise self.UnsatisfiableInterpreterConstraintsError(dedent("""\
+        Unable to detect a suitable interpreter for compatibilities: {} (Conflicting targets: {})
+
+        Pants detected these interpreter versions on your system: {}
+
+        Possible ways to fix this:
+        * Modify your Python interpreter constraints by following https://www.pantsbuild.org/python_readme.html#configure-the-python-version.
+        * Ensure the targeted Python version is installed and discoverable.
+        * Modify Pants' interpreter search paths via --pants-setup-interpreter-search-paths.""".format(
+          ' && '.join(sorted(unique_compatibilities_strs)),
+          ', '.join(tgts_by_compatibilities_strs),
+          ', '.join(all_interpreter_version_strings)
+        )))
+    # Return the lowest compatible interpreter.
+    return min(allowed_interpreters)
+
+  def _interpreter_from_relpath(self, path, filters=()):
+    path = os.path.join(self._cache_dir, path)
     try:
       executable = os.readlink(os.path.join(path, 'python'))
+      if not os.path.exists(executable):
+        self._purge_interpreter(path)
+        return None
     except OSError:
       return None
-    interpreter = PythonInterpreter(executable, identity)
-    if self._matches(interpreter, filters):
-      return _resolve(self._config, interpreter, logger=self._logger)
+    interpreter = PythonInterpreter.from_binary(executable)
+    if self._matches(interpreter, filters=filters):
+      return interpreter
     return None
 
-  def _setup_interpreter(self, interpreter):
-    interpreter_dir = os.path.join(self._path, str(interpreter.identity))
-    safe_mkdir(interpreter_dir)
-    _safe_link(interpreter.binary, os.path.join(interpreter_dir, 'python'))
-    return _resolve(self._config, interpreter, logger=self._logger)
+  def _setup_interpreter(self, interpreter, identity_str):
+    cache_target_path = os.path.join(self._cache_dir, identity_str)
+    with safe_concurrent_creation(cache_target_path) as safe_path:
+      os.mkdir(safe_path)  # Parent will already have been created by safe_concurrent_creation.
+      os.symlink(interpreter.binary, os.path.join(safe_path, 'python'))
+      return interpreter
 
-  def _setup_cached(self, filters):
-    for interpreter_dir in os.listdir(self._path):
-      path = os.path.join(self._path, interpreter_dir)
-      pi = self._interpreter_from_path(path, filters)
+  def _setup_cached(self, filters=()):
+    """Find all currently-cached interpreters."""
+    for interpreter_dir in os.listdir(self._cache_dir):
+      pi = self._interpreter_from_relpath(interpreter_dir, filters=filters)
       if pi:
-        self._logger('Detected interpreter %s: %s' % (pi.binary, str(pi.identity)))
-        self._interpreters.add(pi)
+        logger.debug('Detected interpreter {}: {}'.format(pi.binary, str(pi.identity)))
+        yield pi
 
-  def _setup_paths(self, paths, filters):
-    for interpreter in self._matching(PythonInterpreter.all(paths), filters):
+  def _setup_paths(self, paths, filters=()):
+    """Find interpreters under paths, and cache them."""
+    for interpreter in self._matching(PythonInterpreter.all(paths), filters=filters):
       identity_str = str(interpreter.identity)
-      path = os.path.join(self._path, identity_str)
-      pi = self._interpreter_from_path(path, filters)
+      pi = self._interpreter_from_relpath(identity_str, filters=filters)
       if pi is None:
-        self._setup_interpreter(interpreter)
-        pi = self._interpreter_from_path(path, filters)
-        if pi is None:
-          continue
-      self._interpreters.add(pi)
+        self._setup_interpreter(interpreter, identity_str)
+        pi = self._interpreter_from_relpath(identity_str, filters=filters)
+      if pi:
+        yield pi
 
-  def matches(self, filters):
-    """Given some filters, yield any interpreter that matches at least one of them.
-
-    :param filters: A sequence of strings that constrain the interpreter compatibility for this
-      cache, using the Requirement-style format, e.g. ``'CPython>=3', or just ['>=2.7','<3']``
-      for requirements agnostic to interpreter class.
-    """
-    for match in self._matching(self._interpreters, filters):
-      yield match
-
-  def setup(self, paths=(), force=False, filters=(b'',)):
+  def setup(self, filters=()):
     """Sets up a cache of python interpreters.
 
-    NB: Must be called prior to accessing the ``interpreters`` property or the ``matches`` method.
-
-    :param paths: The paths to search for a python interpreter; the system ``PATH`` by default.
-    :param bool force: When ``True`` the interpreter cache is always re-built.
     :param filters: A sequence of strings that constrain the interpreter compatibility for this
       cache, using the Requirement-style format, e.g. ``'CPython>=3', or just ['>=2.7','<3']``
       for requirements agnostic to interpreter class.
+    :returns: A list of cached interpreters
+    :rtype: list of :class:`pex.interpreter.PythonInterpreter`
     """
-    has_setup = False
-    filters = self._default_filters if not any(filters) else filters
-    setup_paths = paths or os.getenv('PATH').split(os.pathsep)
-    self._setup_cached(filters)
-    if force:
-      has_setup = True
-      self._setup_paths(setup_paths, filters)
-    matches = list(self.matches(filters))
-    if len(matches) == 0 and not has_setup:
-      self._setup_paths(setup_paths, filters)
-      matches = list(self.matches(filters))
+    # We filter the interpreter cache itself (and not just the interpreters we pull from it)
+    # because setting up some python versions (e.g., 3<=python<3.3) crashes, and this gives us
+    # an escape hatch.
+    filters = filters if any(filters) else self.python_setup.interpreter_constraints
+    setup_paths = self.python_setup.interpreter_search_paths
+    logger.debug(
+      'Initializing Python interpreter cache matching filters `{}` from paths `{}`'.format(
+        ':'.join(filters), ':'.join(setup_paths)))
+
+    interpreters = []
+    def unsatisfied_filters():
+      return [f for f in filters if len(list(self._matching(interpreters, [f]))) == 0]
+
+    with OwnerPrintingInterProcessFileLock(path=os.path.join(self._cache_dir, '.file_lock')):
+      interpreters.extend(self._setup_cached(filters=filters))
+      if not interpreters or unsatisfied_filters():
+        interpreters.extend(self._setup_paths(setup_paths, filters=filters))
+
+    for filt in unsatisfied_filters():
+      logger.debug('No valid interpreters found for {}!'.format(filt))
+
+    matches = list(self._matching(interpreters, filters=filters))
     if len(matches) == 0:
-      self._logger('Found no valid interpreters!')
+      logger.debug('Found no valid interpreters!')
+
+    logger.debug(
+      'Initialized Python interpreter cache with {}'.format(', '.join([x.binary for x in matches])))
     return matches
+
+  def _purge_interpreter(self, interpreter_dir):
+    try:
+      logger.info('Detected stale interpreter `{}` in the interpreter cache, purging.'
+                  .format(interpreter_dir))
+      shutil.rmtree(interpreter_dir, ignore_errors=True)
+    except Exception as e:
+      logger.warn(
+        'Caught exception {!r} during interpreter purge. Please run `./pants clean-all`!'
+        .format(e)
+      )

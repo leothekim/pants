@@ -1,82 +1,38 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
-import logging
 import os
-import sys
-import traceback
+import time
 
-from pants.base.build_environment import get_buildroot, pants_version
-from pants.bin.goal_runner import GoalRunner
-
-
-_LOG_EXIT_OPTION = '--log-exit'
-_VERSION_OPTION = '--version'
-_PRINT_EXCEPTION_STACKTRACE = '--print-exception-stacktrace'
+from pants.base.exception_sink import ExceptionSink
+from pants.base.exiter import Exiter
+from pants.bin.pants_runner import PantsRunner
+from pants.util.contextutil import maybe_profiled
 
 
-class _Exiter(object):
-  def __init__(self):
-    # Since we have some exit paths that run via the sys.excepthook,
-    # symbols we use can become garbage collected before we use them; ie:
-    # we can find `sys` and `traceback` are `None`.  As a result we capture
-    # all symbols we need here to ensure we function in excepthook context.
-    # See: http://stackoverflow.com/questions/2572172/referencing-other-modules-in-atexit
-    self._exit = sys.exit
-    self._format_tb = traceback.format_tb
-    self._is_log_exit = _LOG_EXIT_OPTION in sys.argv
-    self._is_print_backtrace = _PRINT_EXCEPTION_STACKTRACE in sys.argv
-
-  def do_exit(self, result=0, msg=None, out=sys.stderr):
-    if msg:
-      print(msg, file=out)
-    if self._is_log_exit and result == 0:
-      print("\nSUCCESS\n")
-    self._exit(result)
-
-  def exit_and_fail(self, msg=None):
-    self.do_exit(result=1, msg=msg)
-
-  def unhandled_exception_hook(self, exception_class, exception, tb):
-    msg = ''
-    if self._is_print_backtrace:
-      msg = '\nException caught:\n' + ''.join(self._format_tb(tb))
-    if str(exception):
-      msg += '\nException message: %s\n' % str(exception)
-    else:
-      msg += '\nNo specific exception message.\n'
-    # TODO(Jin Feng) Always output the unhandled exception details into a log file.
-    self.exit_and_fail(msg)
+TEST_STR = 'T E S T'
 
 
-def _run(exiter):
-  # Place the registration of the unhandled exception hook as early as possible in the code.
-  sys.excepthook = exiter.unhandled_exception_hook
+def test():
+  """An alternate testing entrypoint that helps avoid dependency linkages
+  into `tests/python` from the `bin` target."""
+  print(TEST_STR)
 
-  logging.basicConfig()
-  version = pants_version()
-  if len(sys.argv) == 2 and sys.argv[1] == _VERSION_OPTION:
-    exiter.do_exit(msg=version, out=sys.stdout)
 
-  root_dir = get_buildroot()
-  if not os.path.exists(root_dir):
-    exiter.exit_and_fail('PANTS_BUILD_ROOT does not point to a valid path: %s' % root_dir)
+def test_env():
+  """An alternate test entrypoint for exercising scrubbing."""
+  import os
+  print('PANTS_ENTRYPOINT={}'.format(os.environ.get('PANTS_ENTRYPOINT')))
 
-  goal_runner = GoalRunner(root_dir)
-  goal_runner.setup()
-  result = goal_runner.run()
-  exiter.do_exit(result)
 
 def main():
-  exiter = _Exiter()
-  try:
-    _run(exiter)
-  except KeyboardInterrupt:
-    exiter.exit_and_fail('Interrupted by user.')
+  start_time = time.time()
 
-if __name__ == '__main__':
-  main()
+  exiter = Exiter()
+  ExceptionSink.reset_exiter(exiter)
+
+  with maybe_profiled(os.environ.get('PANTSC_PROFILE')):
+    try:
+      PantsRunner(exiter, start_time=start_time).run()
+    except KeyboardInterrupt as e:
+      exiter.exit_and_fail('Interrupted by user:\n{}'.format(e))

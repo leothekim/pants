@@ -1,27 +1,35 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
-from pants.backend.jvm.scala.target_platform import TargetPlatform
+from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.targets.exportable_jvm_library import ExportableJvmLibrary
-from pants.base.address import SyntheticAddress
+from pants.backend.jvm.targets.junit_tests import JUnitTests
 from pants.base.exceptions import TargetDefinitionException
+from pants.base.payload import Payload
+from pants.base.payload_field import PrimitiveField
+from pants.build_graph.address import Address
 
 
 class ScalaLibrary(ExportableJvmLibrary):
-  """A collection of Scala code.
+  """A Scala library.
 
   Normally has conceptually-related sources; invoking the ``compile`` goal
   on this target compiles scala and generates classes. Invoking the ``bundle``
   goal on this target creates a ``.jar``; but that's an unusual thing to do.
   Instead, a ``jvm_binary`` might depend on this library; that binary is a
   more sensible thing to bundle.
+
+  :API: public
   """
 
-  def __init__(self, java_sources=None, **kwargs):
+  default_sources_globs = '*.scala'
+  default_sources_exclude_globs = JUnitTests.scala_test_globs
+
+  @classmethod
+  def subsystems(cls):
+    return super().subsystems() + (ScalaPlatform, )
+
+  def __init__(self, java_sources=None, payload=None, **kwargs):
     """
     :param java_sources: Java libraries this library has a *circular*
       dependency on.
@@ -33,30 +41,32 @@ class ScalaLibrary(ExportableJvmLibrary):
     :param resources: An optional list of paths (DEPRECATED) or ``resources``
       targets containing resources that belong on this library's classpath.
     """
-    self._java_sources_specs = self.assert_list(java_sources)
-    super(ScalaLibrary, self).__init__(**kwargs)
-    self.add_labels('scala')
+    payload = payload or Payload()
+    payload.add_fields({
+      'java_sources': PrimitiveField(self.assert_list(java_sources, key_arg='java_sources')),
+    })
+    super().__init__(payload=payload, **kwargs)
 
-  @property
-  def traversable_dependency_specs(self):
-    for spec in super(ScalaLibrary, self).traversable_dependency_specs:
+  @classmethod
+  def compute_injectable_specs(cls, kwargs=None, payload=None):
+    for spec in super().compute_injectable_specs(kwargs, payload):
       yield spec
 
-    # TODO(John Sirois): Targets should have a config plumbed as part of the implicit
-    # BuildFileParser injected context and that could be used to allow in general for targets with
-    # knobs and in particular an explict config arg to the TargetPlatform constructor below.
-    for library_spec in TargetPlatform().library_specs:
-      yield library_spec
-
-  @property
-  def traversable_specs(self):
-    for spec in super(ScalaLibrary, self).traversable_specs:
-      yield spec
-    for java_source_spec in self._java_sources_specs:
+    target_representation = kwargs or payload.as_dict()
+    java_sources_specs = target_representation.get('java_sources', None) or []
+    for java_source_spec in java_sources_specs:
       yield java_source_spec
 
+  @classmethod
+  def compute_dependency_specs(cls, kwargs=None, payload=None):
+    for spec in super().compute_dependency_specs(kwargs, payload):
+      yield spec
+
+    for spec in ScalaPlatform.global_instance().injectables_specs_for_key('scala-library'):
+      yield spec
+
   def get_jar_dependencies(self):
-    for jar in super(ScalaLibrary, self).get_jar_dependencies():
+    for jar in super().get_jar_dependencies():
       yield jar
     for java_source_target in self.java_sources:
       for jar in java_source_target.jar_dependencies:
@@ -64,9 +74,11 @@ class ScalaLibrary(ExportableJvmLibrary):
 
   @property
   def java_sources(self):
-    for spec in self._java_sources_specs:
-      address = SyntheticAddress.parse(spec, relative_to=self.address.spec_path)
+    targets = []
+    for spec in self.payload.java_sources:
+      address = Address.parse(spec, relative_to=self.address.spec_path)
       target = self._build_graph.get_target(address)
       if target is None:
-        raise TargetDefinitionException(self, 'No such java target: %s' % spec)
-      yield target
+        raise TargetDefinitionException(self, 'No such java target: {}'.format(spec))
+      targets.append(target)
+    return targets

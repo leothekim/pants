@@ -1,21 +1,20 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
+from hashlib import sha1
 
-from pants.backend.jvm.targets.exclude import Exclude
-from pants.backend.jvm.targets.jar_dependency import IvyArtifact, JarDependency
-from pants.backend.jvm.targets.jvm_binary import Bundle
 from pants.backend.python.python_requirement import PythonRequirement
-from pants.base.payload import Payload, PayloadFieldAlreadyDefinedError, PayloadFrozenError
-from pants.base.payload_field import (BundleField, ExcludesField, JarsField, PrimitiveField,
-                                      PythonRequirementsField, SourcesField)
-from pants_test.base_test import BaseTest
+from pants.base.payload_field import (ExcludesField, FingerprintedField, FingerprintedMixin,
+                                      JarsField, PrimitiveField, PrimitivesSetField,
+                                      PythonRequirementsField)
+from pants.java.jar.exclude import Exclude
+from pants.java.jar.jar_dependency import JarDependency
+from pants.util.strutil import ensure_binary
+from pants_test.test_base import TestBase
 
 
-class PayloadTest(BaseTest):
+class PayloadTest(TestBase):
+
   def test_excludes_field(self):
     empty = ExcludesField()
     empty_fp = empty.fingerprint()
@@ -35,96 +34,6 @@ class PayloadTest(BaseTest):
       JarsField([jar1, jar2]).fingerprint(),
       JarsField([jar2, jar1]).fingerprint(),
     )
-
-  def test_jars_field_artifacts(self):
-    jar1 = JarDependency('com', 'foo', '1.0.0').with_artifact('com', 'baz')
-    jar2 = JarDependency('com', 'foo', '1.0.0')
-
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts_arg(self):
-    jar1 = JarDependency('com', 'foo', '1.0.0', artifacts=[IvyArtifact('com', 'baz')])
-    jar2 = JarDependency('com', 'foo', '1.0.0')
-
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts_arg_vs_method(self):
-    jar1 = JarDependency('com', 'foo', '1.0.0', artifacts=[IvyArtifact('com', 'baz')])
-    jar2 = JarDependency('com', 'foo', '1.0.0').with_artifact('com', 'baz')
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts(self):
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('com', 'baz')
-              .with_artifact('org', 'bat'))
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat')
-              .with_artifact('com', 'baz'))
-    jar3 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat'))
-
-    jar4 = JarDependency('com', 'foo', '1.0.0')
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar3]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar4]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar3]).fingerprint(),
-      JarsField([jar4]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts_ordering(self):
-    """JarDependencies throw away ordering information about their artifacts in the cache key.
-
-    But they do not throw it away in their internal representation!  In the future, this should be
-    fixed: either they should sort them as they are added and keep a canonical representation, or
-    the order information should be preserved.
-    """
-
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('com', 'baz')
-              .with_artifact('org', 'bat'))
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat')
-              .with_artifact('com', 'baz'))
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_deprecated_jars_field_methods(self):
-    """with_sources() and with_docs() are now no-ops.  This test shows they don't affect
-    fingerprinting.
-    """
-    jar1 = (JarDependency('com', 'foo', '1.0.0'))
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-            .with_sources()
-            .with_docs())
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-      )
 
   def test_jars_field_apidocs(self):
     """apidocs are not properly rolled into the cache key right now.  Is this intentional?"""
@@ -146,20 +55,6 @@ class PayloadTest(BaseTest):
       PythonRequirementsField([req2]).fingerprint(),
     )
 
-  def test_python_requirements_field_version_filter(self):
-    """version_filter is a lambda and can't be hashed properly.
-
-    Since in practice this is only ever used to differentiate between py3k and py2, it should use
-    a tuple of strings or even just a flag instead.
-    """
-    req1 = PythonRequirement('foo==1.0', version_filter=lambda py, pl: False)
-    req2 = PythonRequirement('foo==1.0')
-
-    self.assertEqual(
-      PythonRequirementsField([req1]).fingerprint(),
-      PythonRequirementsField([req2]).fingerprint(),
-    )
-
   def test_primitive_field(self):
     self.assertEqual(
       PrimitiveField({'foo': 'bar'}).fingerprint(),
@@ -175,14 +70,14 @@ class PayloadTest(BaseTest):
     )
     self.assertEqual(
       PrimitiveField('foo').fingerprint(),
-      PrimitiveField(b'foo').fingerprint(),
+      PrimitiveField('foo').fingerprint(),
     )
     self.assertNotEqual(
       PrimitiveField('foo').fingerprint(),
       PrimitiveField('bar').fingerprint(),
     )
 
-  def test_excludes_field(self):
+  def test_excludes_field_again(self):
     self.assertEqual(
       ExcludesField([Exclude('com', 'foo')]).fingerprint(),
       ExcludesField([Exclude('com', 'foo')]).fingerprint(),
@@ -200,62 +95,60 @@ class PayloadTest(BaseTest):
       ExcludesField([Exclude('org', 'bar'), Exclude('com', 'foo')]).fingerprint(),
     )
 
-  def test_sources_field(self):
-    self.create_file('foo/bar/a.txt', 'a_contents')
-    self.create_file('foo/bar/b.txt', 'b_contents')
+  def test_fingerprinted_field(self):
+    class TestValue(FingerprintedMixin):
 
+      def __init__(self, test_value):
+        self.test_value = test_value
+
+      def fingerprint(self):
+        hasher = sha1()
+        self.test_value = ensure_binary(self.test_value)
+        hasher.update(self.test_value)
+        return hasher.hexdigest()
+
+    field1 = TestValue('field1')
+    field1_same = TestValue('field1')
+    field2 = TestValue('field2')
+    self.assertEqual(field1.fingerprint(), field1_same.fingerprint())
+    self.assertNotEqual(field1.fingerprint(), field2.fingerprint())
+
+    fingerprinted_field1 = FingerprintedField(field1)
+    fingerprinted_field1_same = FingerprintedField(field1_same)
+    fingerprinted_field2 = FingerprintedField(field2)
+    self.assertEqual(fingerprinted_field1.fingerprint(), fingerprinted_field1_same.fingerprint())
+    self.assertNotEqual(fingerprinted_field1.fingerprint(), fingerprinted_field2.fingerprint())
+
+  def test_set_of_primitives_field(self):
+    # Should preserve `None` values.
+    self.assertEqual(PrimitivesSetField(None).value, None)
+
+    def sopf(underlying):
+      return PrimitivesSetField(underlying).fingerprint()
+    self.assertEqual(
+      sopf({'one', 'two'}),
+      sopf({'two', 'one'}),
+    )
+    self.assertEqual(
+      sopf(['one', 'two']),
+      sopf(['two', 'one']),
+    )
+    self.assertEqual(
+      sopf(None),
+      sopf(None),
+    )
     self.assertNotEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['b.txt'],
-      ).fingerprint(),
+      sopf(None),
+      sopf(['one']),
+    )
+    self.assertNotEqual(
+      sopf(None),
+      sopf([]),
     )
 
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-    )
+  def test_unimplemented_fingerprinted_field(self):
+    class TestUnimplementedValue(FingerprintedMixin):
+      pass
 
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-    )
-
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt', 'b.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['b.txt', 'a.txt'],
-      ).fingerprint(),
-    )
-
-    fp1 = SourcesField(
-            sources_rel_path='foo/bar',
-            sources=['a.txt'],
-          ).fingerprint()
-    self.create_file('foo/bar/a.txt', 'a_contents_different')
-    fp2 = SourcesField(
-            sources_rel_path='foo/bar',
-            sources=['a.txt'],
-          ).fingerprint()
-
-    self.assertNotEqual(fp1, fp2)
+    with self.assertRaises(NotImplementedError):
+      FingerprintedField(TestUnimplementedValue()).fingerprint()

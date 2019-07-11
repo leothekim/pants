@@ -1,0 +1,53 @@
+# Copyright 2017 Pants project contributors (see CONTRIBUTORS.md).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+python_library(
+  dependencies=[
+    ':plugins',
+    '3rdparty/python:pex',
+    '3rdparty/python:setuptools',
+    '3rdparty/python:wheel',
+    '3rdparty/python/twitter/commons:twitter.common.collections',
+    'src/python/pants/backend/python/subsystems',
+    'src/python/pants/base:build_environment',
+    'src/python/pants/base:exception_sink',
+    'src/python/pants/base:exceptions',
+    'src/python/pants/base:target_roots',
+    'src/python/pants/binaries',
+    'src/python/pants/build_graph',
+    'src/python/pants/core_tasks',
+    'src/python/pants/engine/legacy:address_mapper',
+    'src/python/pants/engine/legacy:graph',
+    'src/python/pants/engine/legacy:options_parsing',
+    'src/python/pants/engine/legacy:parser',
+    'src/python/pants/engine/legacy:structs',
+    'src/python/pants/engine:build_files',
+    'src/python/pants/engine:console',
+    'src/python/pants/engine:mapper',
+    'src/python/pants/engine:native',
+    'src/python/pants/engine:parser',
+    'src/python/pants/engine:scheduler',
+    'src/python/pants/goal',
+    'src/python/pants/goal:run_tracker',
+    'src/python/pants/option',
+    'src/python/pants/process',
+    'src/python/pants/rules/core',
+    'src/python/pants/subsystem',
+    'src/python/pants/util:dirutil',
+    'src/python/pants/util:memo',
+    'src/python/pants:version',
+  ]
+)
+
+target(
+  name='plugins',
+  dependencies=[
+    'src/python/pants/backend/codegen:plugin',
+    'src/python/pants/backend/docgen:plugin',
+    'src/python/pants/backend/graph_info:plugin',
+    'src/python/pants/backend/jvm:plugin',
+    'src/python/pants/backend/project_info:plugin',
+    'src/python/pants/backend/python:plugin',
+    'src/python/pants/backend/native',
+  ],
+)

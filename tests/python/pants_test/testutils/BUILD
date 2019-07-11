@@ -2,11 +2,50 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_library(
-  name = 'testutils',
-  sources = globs('*.py'),
+  name = 'mock_logger',
+  sources = globs('mock_logger.py'),
   dependencies = [
-    'src/python/pants/base:target',
     'src/python/pants/reporting',
-    'src/python/pants/backend/core/targets:common',
   ],
+)
+
+python_library(
+  name = 'file_test_util',
+  sources = [
+    'file_test_util.py',
+  ],
+  dependencies = [
+  ],
+)
+
+python_library(
+  name = 'git_util',
+  sources = [
+    'git_util.py',
+  ],
+  dependencies = [
+    'src/python/pants/base:revision',
+    'src/python/pants/scm:git',
+    'src/python/pants/util:contextutil',
+  ],
+)
+
+python_library(
+  name = 'process_test_util',
+  sources = [
+    'process_test_util.py',
+  ],
+  dependencies = [
+    '3rdparty/python:psutil',
+  ],
+)
+
+python_library(
+  name = 'pexrc_util',
+  sources = [
+    'pexrc_util.py',
+  ],
+  dependencies = [
+    ':git_util'
+  ,]
 )

@@ -1,35 +1,61 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-target(
-  name='python',
-  dependencies=[
-    ':test_builder',
-    ':test_python_requirement_list',
-  ]
-)
-
 python_tests(
-  name='test_builder',
-  sources=['test_test_builder.py'],
-  dependencies=[
-    '3rdparty/python:coverage',
-    '3rdparty/python:pex',
-    'src/python/pants/backend/python/targets:python',
-    'src/python/pants/backend/python:test_builder',
-    'src/python/pants/base:build_file_aliases',
-    'src/python/pants/util:contextutil',
-    'tests/python/pants_test:base_test'
-  ]
-)
-
-python_tests(
-  name='test_python_requirement_list',
-  sources=['test_python_requirement_list.py'],
+  name='pants_requirement',
+  sources=['test_pants_requirement.py'],
   dependencies=[
     'src/python/pants/backend/python:python_requirement',
+    'src/python/pants/backend/python:plugin',
     'src/python/pants/backend/python/targets:python',
-    'src/python/pants/base:build_file_aliases',
-    'tests/python/pants_test:base_test'
+    'src/python/pants/base:build_environment',
+    'tests/python/pants_test:test_base',
+  ]
+)
+
+python_tests(
+  name='python_requirement_list',
+  sources=['test_python_requirement_list.py'],
+  dependencies=[
+    'src/python/pants/backend/python/targets:python',
+    'src/python/pants/backend/python:python_requirement',
+    'src/python/pants/base:exceptions',
+    'src/python/pants/build_graph',
+    'tests/python/pants_test:test_base'
+  ]
+)
+
+python_tests(
+  name = 'interpreter_cache',
+  sources = ['test_interpreter_cache.py'],
+  dependencies = [
+    'src/python/pants/backend/python/subsystems',
+    'src/python/pants/backend/python:interpreter_cache',
+    'src/python/pants/util:contextutil',
+    'tests/python/pants_test/testutils:pexrc_util',
+    'tests/python/pants_test:interpreter_selection_utils',
+    'tests/python/pants_test:test_base',
+  ],
+)
+
+python_tests(
+  name='integration',
+  sources=globs('*_integration.py'),
+  dependencies=[
+    ':pants_requirement_integration_test_base',
+    'src/python/pants/base:build_environment',
+    'tests/python/pants_test:int-test',
+  ],
+  tags={'integration'},
+)
+
+python_library(
+  name='pants_requirement_integration_test_base',
+  sources=['pants_requirement_integration_test_base.py'],
+  dependencies=[
+    'src/python/pants/base:build_environment',
+    'src/python/pants/util:contextutil',
+    'src/python/pants/util:dirutil',
+    'tests/python/pants_test:int-test',
   ]
 )

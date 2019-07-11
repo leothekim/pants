@@ -1,0 +1,10 @@
+[package]
+version = "0.0.1"
+edition = "2018"
+name = "async_semaphore"
+authors = [ "Pants Build <pantsbuild@gmail.com>" ]
+publish = false
+
+[dependencies]
+futures = "^0.1.16"
+parking_lot = "0.6"

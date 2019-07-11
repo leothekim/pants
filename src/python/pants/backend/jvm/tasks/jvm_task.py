@@ -1,75 +1,70 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
-
-import os
-
-from pants.backend.core.tasks.task import Task
-from pants.backend.jvm.jvm_debug_config import JvmDebugConfig
-from pants.base.build_environment import get_buildroot
-from pants.util.strutil import safe_shlex_split
+from pants.backend.jvm.subsystems.jvm import JVM
+from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
+from pants.build_graph.build_graph import BuildGraph
+from pants.build_graph.target_scopes import Scopes
+from pants.task.task import Task
 
 
 class JvmTask(Task):
+  """Base class for tasks that whose explicit user-facing purpose is to run code in a JVM.
+
+  Examples are run.jvm, test.junit, repl.scala.  These tasks (and end users) can configure
+  the JVM options, args etc. via the JVM subsystem scoped to the task.
+
+  Note that this is distinct from tasks that happen to run code in a JVM as an implementation
+  detail, such as compile.java, checkstyle, etc.  Hypothetically at least, you could imagine
+  a Java compiler written in a non-JVM language, and then compile.java might not need to
+  run JVM code at all.  In practice that is highly unlikely, but the distinction is still
+  important.  Those JVM-tool-using tasks mix in `pants.backend.jvm.tasks.JvmToolTaskMixin`.
+  """
 
   @classmethod
-  def _legacy_dest_prefix(cls):
-    return cls.options_scope.replace('.', '_')
+  def subsystem_dependencies(cls):
+    return super().subsystem_dependencies() + (JVM.scoped(cls),)
 
   @classmethod
   def register_options(cls, register):
-    super(JvmTask, cls).register_options(register)
-    register('--jvm-options', action='append', metavar='<option>...',
-             help='Run the jvm with these extra jvm options.')
-    register('--args', action='append', metavar='<arg>...',
-             help='Run the jvm with these extra program args.')
-    register('--debug', action='store_true',
-             help='Run the jvm under a debugger.')
-    register('--confs', action='append', default=['default'],
+    super().register_options(register)
+    register('--confs', type=list, default=['default'],
              help='Use only these Ivy configurations of external deps.')
 
   @classmethod
   def prepare(cls, options, round_manager):
-    round_manager.require_data('compile_classpath')
+    round_manager.require_data('runtime_classpath')
 
   def __init__(self, *args, **kwargs):
-    super(JvmTask, self).__init__(*args, **kwargs)
-
-    self.jvm_options = []
-    for jvm_option in self.get_options().jvm_options:
-      self.jvm_options.extend(safe_shlex_split(jvm_option))
-
-    if self.get_options().debug:
-      self.jvm_options.extend(JvmDebugConfig.debug_args(self.context.config))
-
-    self.args = []
-    for arg in self.get_options().args:
-      self.args.extend(safe_shlex_split(arg))
-
+    super().__init__(*args, **kwargs)
+    self.jvm = JVM.scoped_instance(self)
+    self.jvm_options = self.jvm.get_jvm_options()
+    self.args = self.jvm.get_program_args()
     self.confs = self.get_options().confs
+    self.synthetic_classpath = self.jvm.get_options().synthetic_classpath
 
-  def classpath(self, cp=None, confs=None):
-    classpath = list(cp) if cp else []
+  def classpath(self, targets, classpath_prefix=None, classpath_product=None, exclude_scopes=None,
+                include_scopes=None):
+    """Builds a transitive classpath for the given targets.
 
-    compile_classpath = self.context.products.get_data('compile_classpath')
-    classpath.extend(path for conf, path in compile_classpath if not confs or conf in confs)
+    Optionally includes a classpath prefix or building from a non-default classpath product.
 
-    def add_resource_paths(predicate):
-      bases = set()
-      for target in self.context.targets():
-        if predicate(target):
-          if target.target_base not in bases:
-            sibling_resources_base = os.path.join(os.path.dirname(target.target_base), 'resources')
-            classpath.append(os.path.join(get_buildroot(), sibling_resources_base))
-            bases.add(target.target_base)
+    :param targets: the targets for which to build the transitive classpath.
+    :param classpath_prefix: optional additional entries to prepend to the classpath.
+    :param classpath_product: an optional ClasspathProduct from which to build the classpath. if not
+    specified, the runtime_classpath will be used.
+    :param :class:`pants.build_graph.target_scopes.Scope` exclude_scopes: Exclude targets which
+      have at least one of these scopes on the classpath.
+    :param :class:`pants.build_graph.target_scopes.Scope` include_scopes: Only include targets which
+      have at least one of these scopes on the classpath. Defaults to Scopes.JVM_RUNTIME_SCOPES.
+    :return: a list of classpath strings.
+    """
+    include_scopes = Scopes.JVM_RUNTIME_SCOPES if include_scopes is None else include_scopes
+    classpath_product = classpath_product or self.context.products.get_data('runtime_classpath')
+    closure = BuildGraph.closure(targets, bfs=True, include_scopes=include_scopes,
+                                 exclude_scopes=exclude_scopes, respect_intransitive=True)
 
-    if self.context.config.getbool('jvm', 'parallel_src_paths', default=False):
-      add_resource_paths(lambda t: t.is_jvm and not t.is_test)
-
-    if self.context.config.getbool('jvm', 'parallel_test_paths', default=False):
-      add_resource_paths(lambda t: t.is_jvm and t.is_test)
-
+    classpath_for_targets = ClasspathUtil.classpath(closure, classpath_product, self.confs)
+    classpath = list(classpath_prefix or ())
+    classpath.extend(classpath_for_targets)
     return classpath

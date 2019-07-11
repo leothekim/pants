@@ -6,7 +6,7 @@ function help() {
   echo "  -h  display this help"
   echo "  With no arguments, prompts for the last release sha"
   echo
-  echo "Attempts to generate a mostly complete CHANGELOG.rst section"
+  echo "Attempts to generate a mostly complete changelog .rst section"
   echo "given the last release sha.  Each commit since that sha will"
   echo "have an RST compatible bullet generated with commit summary"
   echo "and ISSUE/RB links if present in the commit message.  A"
@@ -28,7 +28,7 @@ then
   help "Too many arguments."
 elif (( $# == 0 ))
 then
- read -p "What sha was the last release made from?: " LAST_RELEASE_SHA
+ read -rp "What sha was the last release made from?: " LAST_RELEASE_SHA
 elif [[ "$1" == "-h" ]]
 then
   help
@@ -36,51 +36,84 @@ else
   LAST_RELEASE_SHA="$1"
 fi
 
-change_count=$(git rev-list HEAD ^${LAST_RELEASE_SHA} | wc -l)
-git log --format="format:%H %aE %s" HEAD ^${LAST_RELEASE_SHA} | {
+echo
+echo "Potentially relevant headers:"
+echo "----------------------------------------------------------------------------------------------------"
+cat <<EOF
 
-  echo
-  echo "There have been ${change_count} changes since the last release."
-  echo
+API Changes
+~~~~~~~~~~~
 
-  while read sha user subject
-  do
-    date=$(git log -1 ${sha} --format="format:%cd")
-    urls=()
-    urls=(
-      ${urls}
-      $(
-        git log -1 ${sha} --format="format:%b" | \
-          grep -E "https?://" | \
-          sed -Ee "s|^.*(https?://[^ ]+).*$|\1|" | \
-          grep -v travis-ci.org | \
-          sed -Ee "s|[/\.]+$||"
-      )
+
+New Features
+~~~~~~~~~~~~
+
+
+Bugfixes
+~~~~~~~~
+
+
+Refactoring, Improvements, and Tooling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+Documentation
+~~~~~~~~~~~~~
+
+
+EOF
+
+echo
+echo "Changes since ${LAST_RELEASE_SHA}:"
+echo "----------------------------------------------------------------------------------------------------"
+echo
+
+for sha in $(git log --format="format:%H" HEAD "^${LAST_RELEASE_SHA}")
+do
+  subject=$(git log -1 --format="format:%s" "$sha")
+  echo "* ${subject}"
+
+  urls=()
+  # WONTFIX: fixing the array expansion is too difficult to be worth it. See https://github.com/koalaman/shellcheck/wiki/SC2207.
+  # shellcheck disable=SC2207
+  urls=(
+    "${urls[@]}"
+    $(
+      git log -1 --oneline "${sha}" | \
+        grep -Eo "\(#[0-9]+\)" | \
+        sed -Ee "s|^\(#([0-9]+)\)$|https://github.com/pantsbuild/pants/pull/\1|"
     )
+  )
+  # WONTFIX: fixing the array expansion is too difficult to be worth it. See https://github.com/koalaman/shellcheck/wiki/SC2207.
+  # shellcheck disable=SC2207
+  urls=(
+    "${urls[@]}"
+    $(
+      git log -1 "${sha}" --format="format:%b" | \
+        grep -E "https?://" | \
+        sed -Ee "s|^.*(https?://[^ ]+).*$|\1|" | \
+        grep -v travis-ci.org | \
+        sed -Ee "s|[/\.]+$||"
+    )
+  )
 
-    echo ${date} ${user}
-    echo "https://github.com/pantsbuild/pants/commit/${sha}"
-    echo "=="
-    echo "* ${subject}"
-
-    for url in ${urls[@]}
-    do
-      if echo ${url} | grep github.com | grep -q /issues/
-      then
-        issue=${url##*/}
-        echo "  \`Issue #${issue} <${url}>\`_"
-      fi
-    done
-
-    for url in ${urls[@]}
-    do
-      if echo ${url} | grep -q rbcommons.com
-      then
-        rb=${url##*/}
-        echo "  \`RB #${rb} <${url}>\`_"
-      fi
-    done
-
-    echo
+  for url in "${urls[@]}"
+  do
+    if echo "${url}" | grep github.com | grep -q /issues/
+    then
+      issue=${url##*/}
+      echo "  \`Issue #${issue} <${url}>\`_"
+    fi
   done
-}
+
+  for url in "${urls[@]}"
+  do
+    if echo "${url}" | grep github.com | grep -q /pull/
+    then
+      issue=${url##*/}
+      echo "  \`PR #${issue} <${url}>\`_"
+    fi
+  done
+
+  echo
+done

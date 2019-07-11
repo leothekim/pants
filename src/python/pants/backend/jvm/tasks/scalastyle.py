@@ -1,172 +1,169 @@
-# coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
-                        unicode_literals, with_statement)
 
 import os
 import re
 
-from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
+from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
-from pants.base.config import Config
 from pants.base.exceptions import TaskError
-from pants.base.target import Target
+from pants.build_graph.target import Target
+from pants.option.custom_types import file_option
 from pants.process.xargs import Xargs
+from pants.task.lint_task_mixin import LintTaskMixin
+from pants.util.dirutil import touch
 
 
-class Scalastyle(NailgunTask, JvmToolTaskMixin):
-  """Checks scala source files to ensure they're stylish.
-
-  Scalastyle only checks against scala sources in non-synthetic
-  targets.
-
-  Scalastyle is configured via the 'scalastyle' pants.ini section.
-
-  * ``config`` - Required path of the scalastyle configuration
-    file. If the file doesn't exist, the task will throw.
-  * ``excludes`` - Optional path of an excludes file that contains
-    lines of regular expressions used to exclude matching files
-    from style checks. File names matched against these regular
-    expressions are relative to the repository root
-    (e.g.: com/twitter/mybird/MyBird.scala). If not specified,
-    all scala sources in the targets will be checked. If the file
-    doesn't exist, the task will throw.
-  """
-
-  _CONFIG_SECTION = 'scalastyle'
-  _CONFIG_SECTION_CONFIG_OPTION = 'config'
-  _CONFIG_SECTION_EXCLUDES_OPTION = 'excludes'
-  _SCALA_SOURCE_EXTENSION = '.scala'
-
-  _MAIN = 'org.scalastyle.Main'
-
-  _scalastyle_config = None
-  _scalastyle_excludes = None
-
-  @classmethod
-  def register_options(cls, register):
-    super(Scalastyle, cls).register_options(register)
-    register('--skip', action='store_true', help='Skip scalastyle.')
-    cls.register_jvm_tool(register, 'scalastyle')
-
-  def __init__(self, *args, **kwargs):
-    super(Scalastyle, self).__init__(*args, **kwargs)
-    self._initialize_config()
-
-  @property
-  def config_section(self):
-    return self._CONFIG_SECTION
-
-  def _initialize_config(self):
-    scalastyle_config = self.context.config.get(
-      self._CONFIG_SECTION, self._CONFIG_SECTION_CONFIG_OPTION)
-
-    # Scalastyle task by default isn't wired up in pants, but if it is installed
-    # via plugin, then the config file setting is required.
-    if not scalastyle_config:
-      raise Config.ConfigError(
-        'Scalastyle config is missing from section[{section}] option[{setting}] in '
-        'pants.ini.'.format(
-          section=self._CONFIG_SECTION,
-          setting=self._CONFIG_SECTION_CONFIG_OPTION))
-
-    # And the config setting value must be a valid file.
-    if not os.path.exists(scalastyle_config):
-      raise Config.ConfigError(
-        'Scalastyle config file specified in section[{section}] option[{setting}] in pants.ini '
-        'does not exist: {file}'.format(
-          section=self._CONFIG_SECTION,
-          setting=self._CONFIG_SECTION_CONFIG_OPTION,
-          file=scalastyle_config))
-
-    excludes_file = self.context.config.get(
-      self._CONFIG_SECTION, self._CONFIG_SECTION_EXCLUDES_OPTION)
-
-    scalastyle_excludes = set()
-    if excludes_file:
-      # excludes setting is optional, but if specified, must be a valid file.
-      if not os.path.exists(excludes_file):
-        raise Config.ConfigError(
-          'Scalastyle excludes file specified in section[{section}] option[{setting}] in '
-          'pants.ini does not exist: {file}'.format(
-            section=self._CONFIG_SECTION,
-            setting=self._CONFIG_SECTION_EXCLUDES_OPTION,
-            file=excludes_file))
-      with open(excludes_file) as fh:
-        for pattern in fh.readlines():
-          scalastyle_excludes.add(re.compile(pattern.strip()))
-          self.context.log.debug(
-            'Scalastyle file exclude pattern: {pattern}'.format(pattern=pattern))
+# TODO: Move somewhere more general?
+class FileExcluder:
+  def __init__(self, excludes_path, log):
+    self.excludes = set()
+    if excludes_path:
+      if not os.path.exists(excludes_path):
+        raise TaskError('Excludes file does not exist: {0}'.format(excludes_path))
+      with open(excludes_path, 'r') as fh:
+        for line in fh.readlines():
+          pattern = line.strip()
+          if pattern and not pattern.startswith('#'):
+            self.excludes.add(re.compile(pattern))
+            log.debug('Exclude pattern: {pattern}'.format(pattern=pattern))
     else:
-      # excludes setting is optional.
-      self.context.log.debug(
-        'Unable to get section[{section}] option[{setting}] value in pants.ini. '
-        'All scala sources will be checked.'.format(
-          section=self._CONFIG_SECTION, setting=self._CONFIG_SECTION_EXCLUDES_OPTION))
+      log.debug('No excludes file specified. All scala sources will be checked.')
 
-    # Only transfer to local variables to the state at the end to minimize side effects.
-    self._scalastyle_config = scalastyle_config or None
-    self._scalastyle_excludes = scalastyle_excludes or None
-
-  @property
-  def _should_skip(self):
-    return self.get_options().skip
-
-  def _get_non_synthetic_scala_targets(self, targets):
-    return filter(
-      lambda target: isinstance(target, Target)
-                     and target.has_sources(self._SCALA_SOURCE_EXTENSION)
-                     and (not target.is_synthetic),
-      targets)
-
-  def _should_include_source(self, source_filename):
-    if not self._scalastyle_excludes:
-      return True
-    for exclude in self._scalastyle_excludes:
+  def should_include(self, source_filename):
+    for exclude in self.excludes:
       if exclude.match(source_filename):
         return False
     return True
 
-  def _get_non_excluded_scala_sources(self, scala_targets):
+
+class Scalastyle(LintTaskMixin, NailgunTask):
+  """Checks scala source files to ensure they're stylish.
+
+  Scalastyle only checks scala sources in non-synthetic targets.
+
+  :API: public
+  """
+
+  class UnspecifiedConfig(TaskError):
+    def __init__(self):
+      super(Scalastyle.UnspecifiedConfig, self).__init__(
+        'Path to scalastyle config file must be specified.')
+
+  class MissingConfig(TaskError):
+    def __init__(self, path):
+      super(Scalastyle.MissingConfig, self).__init__(
+        'Scalastyle config file does not exist: {0}.'.format(path))
+
+  _SCALA_SOURCE_EXTENSION = '.scala'
+
+  _MAIN = 'org.scalastyle.Main'
+
+  @classmethod
+  def subsystem_dependencies(cls):
+    return super().subsystem_dependencies() + (ScalaPlatform, )
+
+  @classmethod
+  def register_options(cls, register):
+    super().register_options(register)
+    register('--config', type=file_option, advanced=True, fingerprint=True,
+             help='Path to scalastyle config file.')
+    register('--excludes', type=file_option, advanced=True, fingerprint=True,
+             help='Path to optional scalastyle excludes file. Each line is a regex. (Blank lines '
+                  'and lines starting with \'#\' are ignored.) A file is skipped if its path '
+                  '(relative to the repo root) matches any of these regexes.')
+    # TODO: Use the task's log level instead of this separate verbosity knob.
+    register('--verbose', type=bool,
+             help='Enable verbose scalastyle output.')
+
+  @classmethod
+  def get_non_synthetic_scala_targets(cls, targets):
+    return [target for target in targets
+            if isinstance(target, Target)
+            and target.has_sources(cls._SCALA_SOURCE_EXTENSION)
+            and not target.is_synthetic]
+
+  @classmethod
+  def get_non_excluded_scala_sources(cls, scalastyle_excluder, scala_targets):
     # Get all the sources from the targets with the path relative to build root.
     scala_sources = list()
     for target in scala_targets:
       scala_sources.extend(target.sources_relative_to_buildroot())
 
-    # make sure only the sources with scala extension stay.
-    scala_sources = filter(
-      lambda filename: filename.endswith(self._SCALA_SOURCE_EXTENSION),
-      scala_sources)
+    # make sure only the sources with the .scala extension stay.
+    scala_sources = [filename for filename in scala_sources if filename.endswith(cls._SCALA_SOURCE_EXTENSION)]
 
     # filter out all sources matching exclude patterns, if specified in config.
-    scala_sources = filter(self._should_include_source, scala_sources)
+    scala_sources = [source for source in scala_sources if scalastyle_excluder.should_include(source)]
 
     return scala_sources
 
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+
+    self._results_dir = os.path.join(self.workdir, 'results')
+
+  def _create_result_file(self, target):
+    result_file = os.path.join(self._results_dir, target.id)
+    touch(result_file)
+    return result_file
+
+  @property
+  def cache_target_dirs(self):
+    return True
+
   def execute(self):
-    if self._should_skip:
-      self.context.log.info('Skipping scalastyle.')
+    # Don't even try and validate options if we're irrelevant.
+    targets = self.get_non_synthetic_scala_targets(self.get_targets())
+    if not targets:
       return
 
-    targets = self._get_non_synthetic_scala_targets(self.context.targets())
-    self.context.log.debug('Non synthetic scala targets to be checked:')
-    for target in targets:
-      self.context.log.debug('  {address_spec}'.format(address_spec=target.address.spec))
+    with self.invalidated(targets) as invalidation_check:
+      invalid_targets = [vt.target for vt in invalidation_check.invalid_vts]
 
-    scala_sources = self._get_non_excluded_scala_sources(targets)
-    self.context.log.debug('Non excluded scala sources to be checked:')
-    for source in scala_sources:
-      self.context.log.debug('  {source}'.format(source=source))
+      scalastyle_config = self.validate_scalastyle_config()
 
-    if scala_sources:
-      def call(srcs):
-        cp = self.tool_classpath('scalastyle')
-        return self.runjava(classpath=cp,
-                            main=self._MAIN,
-                            args=['-c', self._scalastyle_config] + srcs)
-      result = Xargs(call).execute(scala_sources)
-      if result != 0:
-        raise TaskError('java {entry} ... exited non-zero ({exit_code})'.format(
-          entry=Scalastyle._MAIN, exit_code=result))
+      scalastyle_verbose = self.get_options().verbose
+      scalastyle_quiet = self.get_options().quiet or False
+      scalastyle_excluder = self.create_file_excluder()
+
+      self.context.log.debug('Non synthetic scala targets to be checked:')
+      for target in invalid_targets:
+        self.context.log.debug('  {address_spec}'.format(address_spec=target.address.spec))
+
+      scala_sources = self.get_non_excluded_scala_sources(scalastyle_excluder, invalid_targets)
+      self.context.log.debug('Non excluded scala sources to be checked:')
+      for source in scala_sources:
+        self.context.log.debug('  {source}'.format(source=source))
+
+      if scala_sources:
+        def call(srcs):
+          def to_java_boolean(x):
+            return str(x).lower()
+
+          cp = ScalaPlatform.global_instance().style_classpath(self.context.products, self.context._scheduler)
+          scalastyle_args = [
+            '-c', scalastyle_config,
+            '-v', to_java_boolean(scalastyle_verbose),
+            '-q', to_java_boolean(scalastyle_quiet),
+            ]
+          return self.runjava(classpath=cp,
+                              main=self._MAIN,
+                              jvm_options=self.get_options().jvm_options,
+                              args=scalastyle_args + srcs)
+
+        result = Xargs(call).execute(scala_sources)
+        if result != 0:
+          raise TaskError('java {entry} ... exited non-zero ({exit_code})'.format(
+            entry=Scalastyle._MAIN, exit_code=result))
+
+  def validate_scalastyle_config(self):
+    scalastyle_config = self.get_options().config
+    if not scalastyle_config:
+      raise Scalastyle.UnspecifiedConfig()
+    if not os.path.exists(scalastyle_config):
+      raise Scalastyle.MissingConfig(scalastyle_config)
+    return scalastyle_config
+
+  def create_file_excluder(self):
+    return FileExcluder(self.get_options().excludes, self.context.log)
